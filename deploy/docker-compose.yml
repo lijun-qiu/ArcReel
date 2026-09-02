@@ -1,0 +1,80 @@
+services:
+  # 自定义供应商强制 /v1；本机注入代理无 /v1。内置 openrouter/modelscope 不走 /v1。
+  openrouter-strip:
+    image: ghcr.io/arcreel/arcreel:latest
+    entrypoint: ["python", "/strip/strip_v1_proxy.py"]
+    environment:
+      UPSTREAM: http://host.docker.internal:9999
+      LISTEN_PORT: "8080"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./strip_v1_proxy.py:/strip/strip_v1_proxy.py:ro
+    restart: unless-stopped
+
+  modelscope-strip:
+    image: ghcr.io/arcreel/arcreel:latest
+    entrypoint: ["python", "/strip/strip_v1_proxy.py"]
+    environment:
+      UPSTREAM: http://host.docker.internal:10001
+      LISTEN_PORT: "8080"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./strip_v1_proxy.py:/strip/strip_v1_proxy.py:ro
+    restart: unless-stopped
+
+  arcreel:
+    # 官方镜像作运行时；本地 lib/server/frontend/dist 挂载覆盖，改动即时同步。
+    # 若 Docker Hub 可达，可改回 build: ../ 打成 arcreel:local。
+    image: ghcr.io/arcreel/arcreel:latest
+    ports:
+      - "1241:1241"
+    env_file: .env
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+      UV_INDEX_URL: ${UV_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}
+      UV_HTTP_TIMEOUT: ${UV_HTTP_TIMEOUT:-120}
+      OPENROUTER_PROXY_BASE_URL: http://host.docker.internal:9999
+      MODELSCOPE_PROXY_BASE_URL: http://host.docker.internal:10001
+    depends_on:
+      - openrouter-strip
+      - modelscope-strip
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    security_opt:
+      - seccomp:unconfined
+      - apparmor:unconfined
+    cap_add:
+      - NET_ADMIN
+    volumes:
+      - ./.env:/app/.env
+      - ./projects:/app/projects
+      - ./logs:/app/logs
+      - ./vertex_keys:/app/vertex_keys
+      - ./claude_data:/root/.claude
+      # 本地改动热同步（覆盖镜像内文件）
+      - ../lib:/app/lib
+      - ../server:/app/server
+      - ../alembic:/app/alembic
+      - ../agent_runtime_profile:/app/agent_runtime_profile
+      - ../frontend/dist:/app/frontend/dist
+      - ../public:/app/public
+    command:
+      [
+        "uv",
+        "run",
+        "uvicorn",
+        "server.app:app",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "1241",
+        "--reload",
+      ]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:1241/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
