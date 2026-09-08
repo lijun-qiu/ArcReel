@@ -188,7 +188,7 @@ export function AddCredentialModal({
       }
       const res = await API.discoverAnthropicModels({
         base_url: discoverBase,
-        api_key: form.apiKey,
+        api_key: form.primaryApiKey(),
       });
       if (session !== sessionRef.current) return;
       setModelOptions(res.models.map((m) => m.model_id));
@@ -249,7 +249,7 @@ export function AddCredentialModal({
       const res = await API.testAgentConnectionDraft({
         preset_id: form.presetId,
         base_url: submitBaseUrl,
-        api_key: form.apiKey,
+        api_key: form.primaryApiKey(),
         model: form.model || undefined,
       });
       if (session !== sessionRef.current) return;
@@ -441,9 +441,9 @@ export function AddCredentialModal({
               ) : null
             }
           >
-            <input
+            <textarea
               id="cred-key"
-              type="password"
+              rows={4}
               value={form.apiKey}
               onChange={(e) => {
                 form.setApiKey(e.target.value);
@@ -452,9 +452,12 @@ export function AddCredentialModal({
               }}
               autoComplete="off"
               spellCheck={false}
-              placeholder={mode === "edit" ? t("api_key_unchanged_hint") : undefined}
-              className={INPUT_CLS}
+              placeholder={
+                mode === "edit" ? t("api_key_unchanged_hint") : t("api_keys_multiline_placeholder")
+              }
+              className={`${INPUT_CLS} min-h-[5.5rem] resize-y font-mono text-[12px]`}
             />
+            <p className="mt-1 text-[11px] text-text-4">{t("api_keys_multiline_hint")}</p>
           </Field>
 
           <Field

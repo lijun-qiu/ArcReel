@@ -15,8 +15,10 @@
   ``/v1/videos/{task_id}``。
 - ``agnes-video-2.5`` / ``agnes-video-2.5-flash``：官方 Videos 兼容契约；必填 ``mode``
   （``text`` / ``keyframe`` / ``reference``）；输出档 ``size=720P``；参考图走顶层
-  ``images``（data URI，上限 5，``mode=reference``）。时长 2.5 为 4–10s，Flash 为 4–12s。
-  Flash 不支持参考视频。轮询走 ``/agnesapi?video_id=&model_name=``（文档推荐）。
+  ``images``（data URI，上限 5），参考音频走顶层 ``audios``（data URI，上限 3），
+  二者任一非空即 ``mode=reference``（与首/尾帧互斥，与官网一致）。时长 2.5 为 4–10s，
+  Flash 为 4–12s。Flash 不支持参考视频。轮询走 ``/agnesapi?video_id=&model_name=``
+  （文档推荐）。
 """
 
 from __future__ import annotations
@@ -24,6 +26,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import logging
+import re
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -46,6 +49,7 @@ from lib.retry import (
 from lib.video_backends.base import (
     IMAGE_MIME_TYPES,
     ProviderJobIdPersistenceMixin,
+    ReferenceAudioMode,
     ResumeExpiredError,
     VideoCapabilities,
     VideoCapabilityError,
@@ -53,6 +57,7 @@ from lib.video_backends.base import (
     VideoGenerationResult,
     download_video,
     poll_with_retry,
+    reference_audio_to_data_uri,
     should_retry_download,
     should_retry_poll,
     should_retry_submit,
@@ -84,15 +89,25 @@ _V20_MAX_DURATION_SECONDS = 10
 _V20_MAX_REFERENCE_IMAGES = 1
 
 # v2.5：seconds "4"–"10"；size 目前仅 720P；reference 图按计费文案「前 5 张免费」取 5 为编排上限。
+# 参考音频：Flash 文档上限 3；2.5 沿用同一上限（官网 Flash 专属差异表列出 audios，2.5 未给更高值）。
+# 出处：https://www.agnes-ai.com/zh-Hans/docs/agnes-video-25-flash
 _V25_MIN_DURATION_SECONDS = 4
 _V25_MAX_DURATION_SECONDS = 10
 # Flash：seconds "4"–"12"（其余契约与 2.5 相同）。
 _V25_FLASH_MAX_DURATION_SECONDS = 12
 _V25_MAX_REFERENCE_IMAGES = 5
+_V25_MAX_REFERENCE_AUDIO = 3
 _V25_SIZE = "720P"
 _V25_MODE_TEXT = "text"
 _V25_MODE_KEYFRAME = "keyframe"
 _V25_MODE_REFERENCE = "reference"
+
+# 参考音频 data URI MIME：与 ark 同口径（官方示例 .mp3；wav/mp3 均可）。各 backend 自持 MIME 表。
+_REFERENCE_AUDIO_MIME_TYPES = {".wav": "audio/wav", ".mp3": "audio/mp3"}
+
+# 编排层统一写 ``@图片N`` / ``@音频N``；Agnes reference 模式文档要求 ``<Picture N>`` / ``<Audio N>``。
+_V25_PICTURE_TAG_RE = re.compile(r"@图片(\d+)")
+_V25_AUDIO_TAG_RE = re.compile(r"@音频(\d+)")
 
 # 兼容旧常量名（测试 / 外部引用）。
 _MIN_DURATION_SECONDS = _V20_MIN_DURATION_SECONDS
@@ -230,11 +245,20 @@ def _safe_body_for_log(body: dict) -> dict:
     images = body.get("images")
     if isinstance(images, list):
         view["images"] = f"<{len(images)} img>"
+    audios = body.get("audios")
+    if isinstance(audios, list):
+        view["audios"] = f"<{len(audios)} audio>"
     extra = body.get("extra_body")
     if isinstance(extra, dict) and isinstance(extra.get("image"), list):
         mode = extra.get("mode")
         view["extra_body"] = f"<{len(extra['image'])} img{f', mode={mode}' if mode else ''}>"
     return view
+
+
+def _adapt_v25_reference_prompt(prompt: str) -> str:
+    """把共享编排标签改写成 Agnes reference 文档标签，便于模型解析素材指代。"""
+    adapted = _V25_PICTURE_TAG_RE.sub(r"<Picture \1>", prompt)
+    return _V25_AUDIO_TAG_RE.sub(r"<Audio \1>", adapted)
 
 
 def _extract_task_id(body: dict) -> str:
@@ -324,14 +348,17 @@ class AgnesVideoBackend(ProviderJobIdPersistenceMixin):
     def video_capabilities_for_model(model: str) -> VideoCapabilities:
         """按 model_id 纯计算 caps —— 不构造 SDK client（无需 api_key）。
 
-        首帧 + 尾帧；v2.0 参考图上限 1（单图 i2v）；v2.5 参考图上限 5（mode=reference）。
-        参考图不与首帧叠加（单通道）。编排层按此裁剪。
+        首帧 + 尾帧；v2.0 参考图上限 1（单图 i2v）；v2.5 参考图上限 5、参考音频上限 3
+        （mode=reference，与官网 Flash 专属限制一致）。参考图/参考音频不与首帧叠加（单通道）。
+        编排层按此裁剪。
         """
         if _is_v25(model):
             return VideoCapabilities(
                 first_frame=True,
                 last_frame=True,
                 max_reference_images=_V25_MAX_REFERENCE_IMAGES,
+                reference_audio_mode=ReferenceAudioMode.DIRECT,
+                max_reference_audio_count=_V25_MAX_REFERENCE_AUDIO,
             )
         return VideoCapabilities(
             first_frame=True,
@@ -403,7 +430,7 @@ class AgnesVideoBackend(ProviderJobIdPersistenceMixin):
         reference_images = self._valid_paths(request.reference_images)
         start_image = self._single_path(request.start_image)
         end_image = self._single_path(request.end_image)
-        self._reject_mixed_channels(reference_images, start_image, end_image)
+        self._reject_mixed_channels(reference_images, [], start_image, end_image)
 
         if reference_images:
             if len(reference_images) > _V20_MAX_REFERENCE_IMAGES:
@@ -426,9 +453,12 @@ class AgnesVideoBackend(ProviderJobIdPersistenceMixin):
         return payload
 
     def _build_payload_v25(self, request: VideoGenerationRequest) -> dict:
-        """v2.5 提交体：必填 mode；参考图走 ``images``；关键帧走 ``first_frame``/``last_frame``。
+        """v2.5 提交体：必填 mode；参考图走 ``images``；参考音频走 ``audios``；关键帧走
+        ``first_frame``/``last_frame``。
 
         本地文件以 data URI 提交（项目资产无公网 URL）；与图像后端同口径。
+        ``images`` / ``audios`` 与关键帧互斥（官网 mode 规则）；任一参考通道非空即
+        ``mode=reference``（可仅音频、仅图片，或二者兼有）。
         """
         self._reject_out_of_range_duration(
             request.duration_seconds,
@@ -446,11 +476,12 @@ class AgnesVideoBackend(ProviderJobIdPersistenceMixin):
             payload["seed"] = request.seed
 
         reference_images = self._valid_paths(request.reference_images)
+        reference_audios = self._valid_paths(request.reference_audio_files)
         start_image = self._single_path(request.start_image)
         end_image = self._single_path(request.end_image)
-        self._reject_mixed_channels(reference_images, start_image, end_image)
+        self._reject_mixed_channels(reference_images, reference_audios, start_image, end_image)
 
-        if reference_images:
+        if reference_images or reference_audios:
             if len(reference_images) > _V25_MAX_REFERENCE_IMAGES:
                 raise VideoCapabilityError(
                     "video_reference_images_exceeded",
@@ -458,8 +489,19 @@ class AgnesVideoBackend(ProviderJobIdPersistenceMixin):
                     count=len(reference_images),
                     limit=_V25_MAX_REFERENCE_IMAGES,
                 )
+            if len(reference_audios) > _V25_MAX_REFERENCE_AUDIO:
+                raise VideoCapabilityError(
+                    "video_reference_audio_exceeded",
+                    model=self._model,
+                    count=len(reference_audios),
+                    limit=_V25_MAX_REFERENCE_AUDIO,
+                )
             payload["mode"] = _V25_MODE_REFERENCE
-            payload["images"] = [self._encode_media_url(p, role="reference") for p in reference_images]
+            payload["prompt"] = _adapt_v25_reference_prompt(request.prompt)
+            if reference_images:
+                payload["images"] = [self._encode_media_url(p, role="reference") for p in reference_images]
+            if reference_audios:
+                payload["audios"] = [self._encode_reference_audio(p) for p in reference_audios]
         elif start_image is not None and end_image is not None:
             payload["mode"] = _V25_MODE_KEYFRAME
             payload["first_frame"] = self._encode_media_url(start_image, role="start")
@@ -475,11 +517,16 @@ class AgnesVideoBackend(ProviderJobIdPersistenceMixin):
     def _reject_mixed_channels(
         self,
         reference_images: list[Path],
+        reference_audios: list[Path],
         start_image: Path | None,
         end_image: Path | None,
     ) -> None:
-        """参考图与首/尾帧互斥；只给尾帧无首帧时 fail-loud。"""
-        if reference_images and (start_image is not None or end_image is not None):
+        """参考图/参考音频与首/尾帧互斥；只给尾帧无首帧时 fail-loud。
+
+        官网：``keyframe`` 不允许 ``images``/``audios``；``reference`` 不允许 ``first_frame``/
+        ``last_frame``。参考音频同属 reference 通道，与帧混合同样提前拦截。
+        """
+        if (reference_images or reference_audios) and (start_image is not None or end_image is not None):
             raise VideoCapabilityError("video_reference_images_with_frames_unsupported", model=self._model)
         if end_image is not None and start_image is None:
             raise VideoCapabilityError("video_end_image_requires_start_image", model=self._model)
@@ -512,7 +559,7 @@ class AgnesVideoBackend(ProviderJobIdPersistenceMixin):
 
     @classmethod
     def _valid_paths(cls, values: list[Path] | None) -> list[Path]:
-        """归一化参考图列表：剔除空 / 空 Path（``[Path(v) for v if v]`` 对 Path 恒真，不起过滤作用）。"""
+        """归一化参考图/音频列表：剔除空 / 空 Path（``[Path(v) for v if v]`` 对 Path 恒真，不起过滤作用）。"""
         return [p for v in (values or []) if (p := cls._single_path(v)) is not None]
 
     def _encode_start(self, path: Path) -> str:
@@ -541,6 +588,10 @@ class AgnesVideoBackend(ProviderJobIdPersistenceMixin):
             return image_to_data_uri(path, IMAGE_MIME_TYPES)
         except OSError as exc:
             raise VideoCapabilityError(error_code, model=self._model, **err_params) from exc
+
+    def _encode_reference_audio(self, path: Path) -> str:
+        """v2.5 参考音频 → data URI；格式/可读性失败 fail-loud（不跳过，以免 @音频N 错位）。"""
+        return reference_audio_to_data_uri(path, model=self._model, mime_types=_REFERENCE_AUDIO_MIME_TYPES)
 
     def _encode_image(self, path: Path, *, error_code: str, **err_params: str) -> str:
         """裸 base64 编码图像；缺失或不可读时按通道 error_code / 参数名 fail-loud。"""

@@ -1,7 +1,9 @@
 """AgnesImageBackend — Agnes 图像生成后端（单步同步，OpenAI 兼容）。
 
 走 apihub 网关上的 OpenAI 兼容 ``/images/generations`` 同步端点：单次 POST 直接返回图片
-URL 或 base64，立即落地为本地资产。T2I 与 I2I 共用同一端点，I2I 把参考图随请求体下发。
+URL 或 base64，立即落地为本地资产。T2I 与 I2I 共用同一端点；I2I / 多图合成的参考图放在
+``extra_body.image``（官方契约），勿放顶层 ``image``——后者在 ``agnes-image-2.5-flash``
+上会触发 ``team_model_access_denied``。
 尺寸按 ADR 0011 aspect_size 精确算出并显式下发 ``size``（不依赖上游默认横屏尺寸）。
 """
 
@@ -41,7 +43,7 @@ _ROUND_TO = 8
 _MAX_LONG_EDGE = 2048
 _DEFAULT_SHORT = 1440
 
-# 仅允许进日志的标量字段白名单；prompt 仅记长度、image 仅计数，base64/URL 一律不入日志。
+# 仅允许进日志的标量字段白名单；prompt 仅记长度、参考图仅计数，base64/URL 一律不入日志。
 _SAFE_LOG_KEYS = ("model", "size", "n")
 
 
@@ -58,14 +60,15 @@ def _extract_first_str(payload: object, key: str) -> str | None:
 
 
 def _safe_body_for_log(body: dict) -> dict:
-    """生成安全日志视图：白名单标量 + prompt 仅长度 + image 仅计数。"""
+    """生成安全日志视图：白名单标量 + prompt 仅长度 + 参考图仅计数。"""
     view: dict = {key: body[key] for key in _SAFE_LOG_KEYS if key in body}
     prompt = body.get("prompt")
     if isinstance(prompt, str):
         view["prompt_len"] = len(prompt)
-    images = body.get("image")
+    extra = body.get("extra_body")
+    images = extra.get("image") if isinstance(extra, dict) else None
     if isinstance(images, list) and images:
-        view["image"] = f"<{len(images)} ref>"
+        view["extra_body.image"] = f"<{len(images)} ref>"
     return view
 
 
@@ -102,7 +105,8 @@ class AgnesImageBackend:
         # 重试范围（_submit / _download_result），避免下载失败回退到重跑生成 POST 造成重复计费。
         width, height = self._resolve_dimensions(request)
 
-        # 不发 response_format：上游 litellm 网关对该参数报 UnsupportedParamsError；
+        # 不发顶层 response_format：上游 litellm 网关对该参数报 UnsupportedParamsError；
+        # I2I 的 response_format 只能放在 extra_body（官方契约）。
         # 响应默认同时带 url 与 b64_json，由 _persist_image 优先取 url。
         payload: dict = {
             "model": self._model,
@@ -111,9 +115,10 @@ class AgnesImageBackend:
             "size": f"{width}x{height}",
         }
         if request.reference_images:
-            # I2I 参考图随同一请求体下发 data-URI 列表（image 字段）。读盘 + base64 编码
-            # （可能数 MB）offload 到线程，避免阻塞事件循环。
-            payload["image"] = await asyncio.to_thread(self._build_reference_images, request)
+            # I2I / 多图合成：参考图放 extra_body.image（data-URI 列表），与官方文档及
+            # LocalMiniDrama 一致。读盘 + base64 编码（可能数 MB）offload 到线程。
+            refs = await asyncio.to_thread(self._build_reference_images, request)
+            payload["extra_body"] = {"image": refs, "response_format": "url"}
 
         data = await self._submit(payload)
         image_uri = await self._persist_image(data, request.output_path)

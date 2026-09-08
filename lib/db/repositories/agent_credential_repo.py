@@ -4,9 +4,22 @@ from __future__ import annotations
 
 from sqlalchemy import delete, select, update
 
+from lib.agent_key_pool import parse_api_keys, serialize_api_keys
 from lib.db.base import DEFAULT_USER_ID
 from lib.db.models.agent_credential import AgentAnthropicCredential
 from lib.db.repositories.base import BaseRepository
+
+
+def _sync_pool_fields(
+    *,
+    api_key: str | None,
+    api_keys: list | str | None,
+) -> tuple[str, str]:
+    """归一化池与首 key：返回 (primary_api_key, api_keys_json)。"""
+    pool = parse_api_keys(api_keys, fallback_api_key=api_key)
+    if not pool:
+        raise ValueError("api key pool is empty")
+    return pool[0].key, serialize_api_keys(pool)
 
 
 class AgentCredentialRepository(BaseRepository):
@@ -22,6 +35,7 @@ class AgentCredentialRepository(BaseRepository):
         display_name: str,
         base_url: str,
         api_key: str,
+        api_keys: list | str | None = None,
         model: str | None = None,
         haiku_model: str | None = None,
         sonnet_model: str | None = None,
@@ -29,12 +43,14 @@ class AgentCredentialRepository(BaseRepository):
         subagent_model: str | None = None,
         user_id: str = DEFAULT_USER_ID,
     ) -> AgentAnthropicCredential:
+        primary, keys_json = _sync_pool_fields(api_key=api_key, api_keys=api_keys)
         cred = AgentAnthropicCredential(
             user_id=user_id,
             preset_id=preset_id,
             display_name=display_name,
             base_url=base_url,
-            api_key=api_key,
+            api_key=primary,
+            api_keys=keys_json,
             model=model,
             haiku_model=haiku_model,
             sonnet_model=sonnet_model,
@@ -72,6 +88,15 @@ class AgentCredentialRepository(BaseRepository):
         cred = await self.get(cred_id)
         if cred is None:
             return None
+        if "api_key" in kwargs or "api_keys" in kwargs:
+            incoming_key = kwargs.pop("api_key", None)
+            incoming_keys = kwargs.pop("api_keys", None)
+            primary, keys_json = _sync_pool_fields(
+                api_key=incoming_key if incoming_key not in (None, "") else cred.api_key,
+                api_keys=incoming_keys,
+            )
+            cred.api_key = primary
+            cred.api_keys = keys_json
         for k, v in kwargs.items():
             setattr(cred, k, v)
         await self.session.flush()

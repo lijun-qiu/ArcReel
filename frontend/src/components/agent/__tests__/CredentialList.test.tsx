@@ -12,6 +12,9 @@ const mockCred = (overrides: Partial<AgentCredential> = {}): AgentCredential => 
   icon_key: "DeepSeek",
   base_url: "https://api.deepseek.com/anthropic",
   api_key_masked: "sk-x…abcd",
+  api_key_count: 1,
+  api_keys_masked: ["sk-x…abcd"],
+  key_rotation: false,
   model: "deepseek-chat",
   haiku_model: null,
   sonnet_model: null,
@@ -96,5 +99,25 @@ describe("CredentialList", () => {
     );
     fireEvent.click(screen.getByRole("button", { name: /edit|编辑|Chỉnh sửa/i }));
     expect(onEdit).toHaveBeenCalledWith(cred);
+  });
+
+  it("shows key count and rotation badge for multi-key credentials", () => {
+    render(
+      <CredentialList
+        credentials={[
+          mockCred({
+            api_key_count: 3,
+            api_keys_masked: ["sk-a…", "sk-b…", "sk-c…"],
+            key_rotation: true,
+          }),
+        ]}
+        onActivate={vi.fn()}
+        onTest={vi.fn()}
+        onEdit={vi.fn()}
+        onDelete={vi.fn()}
+      />,
+    );
+    expect(screen.getByText(/3 keys|3 个密钥|3 khóa/i)).toBeInTheDocument();
+    expect(screen.getByText(/Built-in rotation|内置轮换|Xoay vòng tích hợp/i)).toBeInTheDocument();
   });
 });

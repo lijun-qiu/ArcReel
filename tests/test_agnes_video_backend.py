@@ -95,19 +95,33 @@ class TestCapabilities:
 
     def test_video_capabilities_v25(self):
         from lib.video_backends.agnes import AgnesVideoBackend
+        from lib.video_backends.base import ReferenceAudioMode
 
         caps = AgnesVideoBackend.video_capabilities_for_model("agnes-video-2.5")
         assert caps.first_frame is True
         assert caps.last_frame is True
         assert caps.max_reference_images == 5
+        assert caps.reference_audio_mode is ReferenceAudioMode.DIRECT
+        assert caps.max_reference_audio_count == 3
 
     def test_video_capabilities_v25_flash(self):
         from lib.video_backends.agnes import AgnesVideoBackend
+        from lib.video_backends.base import ReferenceAudioMode
 
         caps = AgnesVideoBackend.video_capabilities_for_model("agnes-video-2.5-flash")
         assert caps.first_frame is True
         assert caps.last_frame is True
         assert caps.max_reference_images == 5
+        assert caps.reference_audio_mode is ReferenceAudioMode.DIRECT
+        assert caps.max_reference_audio_count == 3
+
+    def test_video_capabilities_v20_no_reference_audio(self):
+        from lib.video_backends.agnes import AgnesVideoBackend
+        from lib.video_backends.base import ReferenceAudioMode
+
+        caps = AgnesVideoBackend.video_capabilities_for_model("agnes-video-v2.0")
+        assert caps.reference_audio_mode is ReferenceAudioMode.NONE
+        assert caps.max_reference_audio_count == 0
 
 
 class TestNumFramesAndSize:
@@ -453,6 +467,136 @@ class TestImageChannels:
                     )
                 )
             assert ei.value.code == "video_reference_images_exceeded"
+
+    async def test_v25_reference_audios_mode(self, tmp_path: Path):
+        """官网 mode=reference 可带 audios；prompt 标签改写为 <Audio N> / <Picture N>。"""
+        ref = _write_image(tmp_path / "char.png", b"img")
+        audio = tmp_path / "voice.wav"
+        audio.write_bytes(b"RIFF\x00\x00\x00\x00WAVE")
+        create_resp = _make_response(200, {"id": "video_aud", "status": "queued"})
+        poll_resp = _make_response(
+            200, {**_completed("video_aud"), "id": "video_aud", "url": "https://cdn.example/v.mp4"}
+        )
+        client = _mock_client(
+            post=AsyncMock(return_value=create_resp),
+            get=AsyncMock(return_value=poll_resp),
+        )
+        fake_download = AsyncMock(side_effect=_fake_download_factory(b"v"))
+
+        with (
+            patch("httpx.AsyncClient", return_value=client),
+            patch("lib.video_backends.agnes._POLL_INTERVAL_SECONDS", 0.0),
+            patch("lib.video_backends.agnes.download_video", fake_download),
+        ):
+            from lib.video_backends.agnes import AgnesVideoBackend
+
+            backend = AgnesVideoBackend(api_key="k", base_url="https://x/v1", model="agnes-video-2.5-flash")
+            await backend.generate(
+                VideoGenerationRequest(
+                    prompt="<丈夫>@图片1的台词音色参考 @音频1，声音特征：低沉",
+                    output_path=tmp_path / "o.mp4",
+                    reference_images=[ref],
+                    reference_audio_files=[audio],
+                    aspect_ratio="16:9",
+                    duration_seconds=5,
+                )
+            )
+
+        body = client.post.call_args.kwargs["json"]
+        assert body["mode"] == "reference"
+        assert body["size"] == "720P"
+        assert len(body["images"]) == 1
+        assert len(body["audios"]) == 1
+        assert body["audios"][0].startswith("data:audio/wav;base64,")
+        assert "<Picture 1>" in body["prompt"]
+        assert "<Audio 1>" in body["prompt"]
+        assert "@图片1" not in body["prompt"]
+        assert "@音频1" not in body["prompt"]
+        assert "first_frame" not in body
+
+    async def test_v25_reference_audios_only(self, tmp_path: Path):
+        """官网允许仅 audios、无 images 的 reference 模式。"""
+        audio = tmp_path / "a.mp3"
+        audio.write_bytes(b"ID3fake")
+        create_resp = _make_response(200, {"id": "aonly", "status": "queued"})
+        poll_resp = _make_response(200, {**_completed("aonly"), "id": "aonly", "url": "https://cdn.example/v.mp4"})
+        client = _mock_client(
+            post=AsyncMock(return_value=create_resp),
+            get=AsyncMock(return_value=poll_resp),
+        )
+        fake_download = AsyncMock(side_effect=_fake_download_factory(b"v"))
+
+        with (
+            patch("httpx.AsyncClient", return_value=client),
+            patch("lib.video_backends.agnes._POLL_INTERVAL_SECONDS", 0.0),
+            patch("lib.video_backends.agnes.download_video", fake_download),
+        ):
+            from lib.video_backends.agnes import AgnesVideoBackend
+
+            backend = AgnesVideoBackend(api_key="k", base_url="https://x/v1", model="agnes-video-2.5")
+            await backend.generate(
+                VideoGenerationRequest(
+                    prompt="以 @音频1 的节奏生成夜间驾驶",
+                    output_path=tmp_path / "o.mp4",
+                    reference_audio_files=[audio],
+                    duration_seconds=5,
+                )
+            )
+
+        body = client.post.call_args.kwargs["json"]
+        assert body["mode"] == "reference"
+        assert "images" not in body
+        assert len(body["audios"]) == 1
+        assert body["audios"][0].startswith("data:audio/mp3;base64,")
+        assert "<Audio 1>" in body["prompt"]
+
+    async def test_v25_reference_audios_exceeded_raises(self, tmp_path: Path):
+        audios = []
+        for i in range(4):
+            p = tmp_path / f"a{i}.wav"
+            p.write_bytes(b"RIFF\x00\x00\x00\x00WAVE")
+            audios.append(p)
+        client = _mock_client(post=AsyncMock(side_effect=AssertionError("超限不应提交")))
+
+        with patch("httpx.AsyncClient", return_value=client):
+            from lib.video_backends.agnes import AgnesVideoBackend
+
+            backend = AgnesVideoBackend(api_key="k", base_url="https://x/v1", model="agnes-video-2.5-flash")
+            with pytest.raises(VideoCapabilityError) as ei:
+                await backend.generate(
+                    VideoGenerationRequest(
+                        prompt="p",
+                        output_path=tmp_path / "o.mp4",
+                        reference_audio_files=audios,
+                        duration_seconds=5,
+                    )
+                )
+            assert ei.value.code == "video_reference_audio_exceeded"
+
+    @pytest.mark.parametrize("frame_field", ["start_image", "end_image"])
+    async def test_v25_frames_and_reference_audio_mutually_exclusive(self, tmp_path: Path, frame_field: str):
+        frame = _write_image(tmp_path / f"{frame_field}.png", b"f")
+        audio = tmp_path / "a.wav"
+        audio.write_bytes(b"RIFF\x00\x00\x00\x00WAVE")
+        # end_image 单独给出时，若无 start，会先命中 end_requires_start；给齐首帧以测音频互斥。
+        kwargs: dict = {
+            "prompt": "p",
+            "output_path": tmp_path / "o.mp4",
+            "reference_audio_files": [audio],
+            "duration_seconds": 5,
+            frame_field: frame,
+        }
+        if frame_field == "end_image":
+            kwargs["start_image"] = _write_image(tmp_path / "start.png", b"s")
+        client = _mock_client(post=AsyncMock(side_effect=AssertionError("互斥不应提交")))
+
+        with patch("httpx.AsyncClient", return_value=client):
+            from lib.video_backends.agnes import AgnesVideoBackend
+
+            backend = AgnesVideoBackend(api_key="k", base_url="https://x/v1", model="agnes-video-2.5")
+            with pytest.raises(VideoCapabilityError) as ei:
+                await backend.generate(VideoGenerationRequest(**kwargs))
+            assert ei.value.code == "video_reference_images_with_frames_unsupported"
 
     async def test_v25_flash_text_mode_duration_12_and_model_name_poll(self, tmp_path: Path):
         """Flash 允许 seconds=12，轮询 /agnesapi 必须带 model_name。"""

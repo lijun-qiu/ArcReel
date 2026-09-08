@@ -5,6 +5,25 @@ import type {
   PresetProvider,
 } from "@/types/agent-credential";
 
+/** First usable key from multiline / comma-separated pool text (for probe/discover). */
+export function primaryApiKeyFromText(text: string): string {
+  for (const part of text.replaceAll(",", "\n").split("\n")) {
+    const line = part.trim();
+    if (!line || line.startsWith("#")) continue;
+    const colon = line.lastIndexOf(":");
+    if (colon > 0) {
+      const maybeLimit = line.slice(colon + 1).trim();
+      if (/^\d+$/.test(maybeLimit)) {
+        const key = line.slice(0, colon).trim();
+        if (key) return key;
+        continue;
+      }
+    }
+    return line;
+  }
+  return text.trim();
+}
+
 export interface CredentialForm {
   presetId: string;
   apiKey: string;
@@ -29,6 +48,8 @@ export interface CredentialForm {
   isDirty: (initial: Partial<CreateAgentCredentialRequest> | undefined) => boolean;
   /** 拼装提交 payload。 */
   buildRequest: () => CreateAgentCredentialRequest;
+  /** First key for discover / draft connection test. */
+  primaryApiKey: () => string;
 }
 
 export function useCredentialForm(
@@ -86,6 +107,8 @@ export function useCredentialForm(
     subagent_model: subagentModel || undefined,
   });
 
+  const primaryApiKey = (): string => primaryApiKeyFromText(apiKey);
+
   return {
     presetId,
     apiKey,
@@ -107,5 +130,6 @@ export function useCredentialForm(
     setPreset,
     isDirty,
     buildRequest,
+    primaryApiKey,
   };
 }

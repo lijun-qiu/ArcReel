@@ -21,6 +21,7 @@ async def test_active_credential_returns_full_dict(monkeypatch: pytest.MonkeyPat
         (),
         dict(
             api_key="sk-test",
+            api_keys=None,
             base_url="https://api.anthropic.com",
             model="claude-opus-4-7",
             haiku_model="claude-haiku-4-5",
@@ -108,6 +109,7 @@ async def test_function_does_not_touch_environ(monkeypatch: pytest.MonkeyPatch) 
         (),
         dict(
             api_key="sk-test",
+            api_keys=None,
             base_url="x",
             model="y",
             haiku_model=None,
@@ -129,3 +131,45 @@ async def test_function_does_not_touch_environ(monkeypatch: pytest.MonkeyPatch) 
 
     await build_anthropic_env_dict(session)
     assert dict(os.environ) == baseline, "build 函数禁止改 os.environ"
+
+
+@pytest.mark.asyncio
+async def test_multi_key_routes_to_embedded_rotator(monkeypatch: pytest.MonkeyPatch) -> None:
+    session = AsyncMock()
+    repo_mock = AsyncMock()
+    cred = type(
+        "Cred",
+        (),
+        dict(
+            api_key="sk-a",
+            api_keys='[{"key":"sk-a"},{"key":"sk-b"}]',
+            base_url="https://apihub.agnes-ai.com",
+            model="agnes-2.5-flash",
+            haiku_model=None,
+            sonnet_model=None,
+            opus_model=None,
+            subagent_model=None,
+        ),
+    )()
+    repo_mock.get_active = AsyncMock(return_value=cred)
+
+    setting_repo = AsyncMock()
+    setting_repo.get_all = AsyncMock(return_value={})
+
+    class _FakeRotator:
+        proxy_token = "proxy-token"
+        base_url = "http://127.0.0.1:9"
+
+    monkeypatch.setattr(
+        "lib.db.repositories.agent_credential_repo.AgentCredentialRepository",
+        lambda _s: repo_mock,
+    )
+    monkeypatch.setattr("lib.config.service.SystemSettingRepository", lambda _s: setting_repo)
+    monkeypatch.setattr(
+        "server.agent_runtime.anthropic_key_rotator.get_rotator",
+        lambda: _FakeRotator(),
+    )
+
+    result = await build_anthropic_env_dict(session)
+    assert result["ANTHROPIC_API_KEY"] == "proxy-token"
+    assert result["ANTHROPIC_BASE_URL"] == "http://127.0.0.1:9"

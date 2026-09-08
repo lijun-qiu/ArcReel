@@ -33,7 +33,11 @@ class AgentAnthropicCredential(TimestampMixin, Base):
     preset_id: Mapped[str] = mapped_column(String(64), nullable=False)  # "deepseek" | "__custom__" | ...
     display_name: Mapped[str] = mapped_column(String(128), nullable=False)
     base_url: Mapped[str] = mapped_column(Text, nullable=False)
-    api_key: Mapped[str] = mapped_column(Text, nullable=False)  # 明文，读出 API mask_secret 脱敏
+    api_key: Mapped[str] = mapped_column(Text, nullable=False)  # 明文，读出 API mask_secret 脱敏；与池首项同步
+    # JSON: [{"key":"...","daily_limit":2000}, ...]；空则运行时回退 api_key
+    api_keys: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # JSON: key_pool 用量/冷却状态（见 lib.agent_key_pool）
+    key_pool_state: Mapped[str | None] = mapped_column(Text, nullable=True)
     model: Mapped[str | None] = mapped_column(String(128), nullable=True)
     haiku_model: Mapped[str | None] = mapped_column(String(128), nullable=True)
     sonnet_model: Mapped[str | None] = mapped_column(String(128), nullable=True)

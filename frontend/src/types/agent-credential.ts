@@ -31,6 +31,10 @@ export interface AgentCredential {
   icon_key: string | null;
   base_url: string;
   api_key_masked: string;
+  /** Number of keys in the pool (≥2 enables built-in rotation). */
+  api_key_count: number;
+  api_keys_masked: string[];
+  key_rotation: boolean;
   model: string | null;
   haiku_model: string | null;
   sonnet_model: string | null;
@@ -44,7 +48,9 @@ export interface CreateAgentCredentialRequest {
   preset_id: string;
   display_name?: string | null;
   base_url?: string | null;
+  /** One key, or multiple keys separated by newlines / commas. */
   api_key: string;
+  api_keys?: string[] | null;
   model?: string | null;
   haiku_model?: string | null;
   sonnet_model?: string | null;

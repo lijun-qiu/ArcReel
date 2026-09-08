@@ -97,9 +97,10 @@ class TestTextToImage:
         assert body["model"] == "agnes-image-2.1-flash"
         assert body["prompt"] == "a fox"
         assert body["n"] == 1
-        # 上游 litellm 网关拒绝 response_format（UnsupportedParamsError）——不得下发
+        # 上游 litellm 网关拒绝顶层 response_format（UnsupportedParamsError）——不得下发
         assert "response_format" not in body
         assert "image" not in body
+        assert "extra_body" not in body
         # 默认 aspect_ratio=9:16 精确算、受单边 2048 收口
         assert body["size"] == "1152x2048"
         # 端点：base host 派生 /v1 + /images/generations
@@ -159,7 +160,7 @@ class TestDimensions:
 
 
 class TestImageToImage:
-    async def test_i2i_reference_images_as_data_uri_list(self, tmp_path: Path):
+    async def test_i2i_reference_images_in_extra_body(self, tmp_path: Path):
         client = _mock_client(_img_response())
         download = AsyncMock()
         refs = [_make_ref(tmp_path, f"r{i}.png") for i in range(2)]
@@ -172,12 +173,17 @@ class TestImageToImage:
                 ImageGenerationRequest(prompt="hero", output_path=tmp_path / "o.png", reference_images=refs)
             )
 
-        images = client.post.call_args.kwargs["json"]["image"]
+        body = client.post.call_args.kwargs["json"]
+        # 官方契约：参考图在 extra_body.image，勿放顶层 image（2.5 I2I 会 403）
+        assert "image" not in body
+        extra = body["extra_body"]
+        assert extra["response_format"] == "url"
+        images = extra["image"]
         assert isinstance(images, list)
         assert len(images) == 2
         assert all(item.startswith("data:image/png;base64,") for item in images)
         # I2I 仍显式下发 size
-        assert "size" in client.post.call_args.kwargs["json"]
+        assert "size" in body
 
     async def test_missing_ref_raises_unreadable(self, tmp_path: Path):
         from lib.image_backends.agnes import AgnesImageBackend

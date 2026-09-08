@@ -444,9 +444,27 @@ async def lifespan(app: FastAPI):
     await project_event_service.start()
     logger.info("ProjectEventService 已启动")
 
+    # 内嵌 Anthropic 多 key 透传轮换（loopback）；单 key 凭证仍直连上游
+    try:
+        from server.agent_runtime.anthropic_key_rotator import get_rotator
+
+        rotator = get_rotator()
+        rotator.bind_session_factory(async_session_factory)
+        await rotator.start()
+        app.state.anthropic_key_rotator = rotator
+        logger.info("Anthropic key rotator ready at %s", rotator.base_url)
+    except Exception as exc:
+        logger.warning("Anthropic key rotator failed to start (non-fatal): %s", exc)
+
     yield
 
     # Shutdown
+    rotator = getattr(app.state, "anthropic_key_rotator", None)
+    if rotator is not None:
+        try:
+            await rotator.stop()
+        except Exception:
+            logger.exception("Anthropic key rotator stop failed")
     project_event_service = getattr(app.state, "project_event_service", None)
     if project_event_service:
         logger.info("正在停止 ProjectEventService...")

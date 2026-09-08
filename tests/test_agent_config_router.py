@@ -113,8 +113,27 @@ async def test_create_with_preset(authed_client) -> None:
     assert cred["display_name"] == "DeepSeek"
     assert cred["api_key_masked"].startswith("sk-")
     assert cred["icon_key"] == "DeepSeek"
+    assert cred["api_key_count"] == 1
+    assert cred["key_rotation"] is False
     # 第一条凭证应自动 active
     assert cred["is_active"] is True
+
+
+@pytest.mark.asyncio
+async def test_create_multiline_keys_enables_rotation(authed_client) -> None:
+    body = {
+        "preset_id": "__custom__",
+        "display_name": "Agnes pool",
+        "base_url": "https://apihub.agnes-ai.com",
+        "api_key": "sk-one\nsk-two\nsk-three",
+        "model": "agnes-2.5-flash",
+    }
+    resp = await authed_client.post("/api/v1/agent/credentials", json=body)
+    assert resp.status_code == 201
+    cred = resp.json()
+    assert cred["api_key_count"] == 3
+    assert cred["key_rotation"] is True
+    assert len(cred["api_keys_masked"]) == 3
 
 
 @pytest.mark.asyncio

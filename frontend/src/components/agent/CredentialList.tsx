@@ -71,10 +71,21 @@ export function CredentialList({
                     </span>
                   )}
                 </div>
-                <div className="mt-0.5 flex items-center gap-2 font-mono text-[10.5px] text-text-4">
+                <div className="mt-0.5 flex flex-wrap items-center gap-2 font-mono text-[10.5px] text-text-4">
                   <span className="truncate">{c.base_url}</span>
                   <span className="shrink-0">·</span>
                   <span className="shrink-0">{c.api_key_masked}</span>
+                  {c.api_key_count > 1 ? (
+                    <>
+                      <span className="shrink-0">·</span>
+                      <span className="shrink-0">{t("cred_key_count", { count: c.api_key_count })}</span>
+                    </>
+                  ) : null}
+                  {c.key_rotation ? (
+                    <span className="inline-flex items-center rounded-full border border-accent/30 bg-accent/10 px-1.5 py-0.5 font-sans text-[9px] uppercase tracking-[0.12em] text-accent">
+                      {t("cred_key_rotation")}
+                    </span>
+                  ) : null}
                 </div>
               </div>
               <div className="flex items-center gap-1">

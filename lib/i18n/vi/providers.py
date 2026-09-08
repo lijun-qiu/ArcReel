@@ -31,6 +31,7 @@ MESSAGES: dict[str, str] = {
     "provider_desc_modelscope": "ModelScope API-Inference văn bản miễn phí qua proxy injector cục bộ (127.0.0.1:10001); khóa client là modelscope_proxy_api_key.",
     # Agent preset notes (lib/agent_provider_catalog.py)
     "preset_notes_deepseek": "Endpoint Anthropic-compat chính thức của DeepSeek; cần API key sk-.",
+    "preset_notes_agnes": "Agnes Messages API tương thích Anthropic (apihub); dùng cùng Bearer/sk key với ảnh/video.",
     "preset_notes_xiaomi_mimo": "Xiaomi MiMo chỉ chấp nhận tên model đã biết; không có danh sách model công khai.",
     "preset_notes_ark_coding_plan": "Gói Volcengine Ark Coding Plan",
     "preset_notes_ark_agent_plan": "Gói Volcengine Ark Agent Plan",

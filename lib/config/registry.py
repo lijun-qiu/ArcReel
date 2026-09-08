@@ -1487,7 +1487,7 @@ PROVIDER_REGISTRY: dict[str, ProviderMeta] = {
                 pricing=_agnes_video_pricing("agnes-video-v2.0", 0.005),
             ),
             # agnes-video-2.5：mode=text|keyframe|reference；seconds 4–10；size 目前仅 720P；
-            # reference 走 images[]，计费文案前 5 张参考图免费。
+            # reference 走 images[] + audios[]（上限见 backend caps），计费文案前 5 张参考图免费。
             "agnes-video-2.5": ModelInfo(
                 display_name="Agnes Video 2.5",
                 media_type="video",
@@ -1497,7 +1497,7 @@ PROVIDER_REGISTRY: dict[str, ProviderMeta] = {
                 pricing=_agnes_video_pricing("agnes-video-2.5", 0.025),
             ),
             # agnes-video-2.5-flash：复用 2.5 契约；seconds 4–12；size 仅 720P；
-            # reference 图上限 5、不支持 videos；刊例价与 2.5 同档（促销不入表）。
+            # reference 图上限 5、音频上限 3、不支持 videos；刊例价与 2.5 同档（促销不入表）。
             "agnes-video-2.5-flash": ModelInfo(
                 display_name="Agnes Video 2.5 Flash",
                 media_type="video",

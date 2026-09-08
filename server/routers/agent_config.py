@@ -12,6 +12,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from lib.agent_key_pool import coerce_keys_from_text, parse_api_keys, serialize_api_keys
 from lib.agent_provider_catalog import CUSTOM_SENTINEL_ID, get_preset, list_presets
 from lib.api_errors import UnprocessableError
 from lib.config.anthropic_probe import DiagnosisCode, run_test
@@ -88,6 +89,9 @@ class CredentialResponse(BaseModel):
     icon_key: str | None
     base_url: str
     api_key_masked: str
+    api_key_count: int
+    api_keys_masked: list[str]
+    key_rotation: bool
     model: str | None
     haiku_model: str | None
     sonnet_model: str | None
@@ -105,7 +109,8 @@ class CreateCredentialRequest(BaseModel):
     preset_id: str
     display_name: str | None = None
     base_url: str | None = None
-    api_key: str
+    api_key: str = ""
+    api_keys: list[str] | None = None
     model: str | None = None
     haiku_model: str | None = None
     sonnet_model: str | None = None
@@ -118,6 +123,7 @@ class UpdateCredentialRequest(BaseModel):
     display_name: str | None = None
     base_url: str | None = None
     api_key: str | None = None
+    api_keys: list[str] | None = None
     model: str | None = None
     haiku_model: str | None = None
     sonnet_model: str | None = None
@@ -125,15 +131,44 @@ class UpdateCredentialRequest(BaseModel):
     subagent_model: str | None = None
 
 
+def _resolve_keys_payload(
+    *,
+    api_key: str | None,
+    api_keys: list[str] | None,
+) -> tuple[str, str | None]:
+    """返回 (primary_or_text, api_keys_json_or_None)。
+
+    - 显式 ``api_keys`` 列表优先
+    - 否则把 ``api_key`` 当多行/逗号文本解析；单行则仅 primary
+    """
+    if api_keys is not None:
+        pool = parse_api_keys(api_keys, fallback_api_key=api_key)
+        if not pool:
+            raise ValueError("empty api key pool")
+        return pool[0].key, serialize_api_keys(pool)
+    text = (api_key or "").strip()
+    if not text:
+        raise ValueError("empty api key")
+    pool = coerce_keys_from_text(text)
+    if len(pool) >= 2:
+        return pool[0].key, serialize_api_keys(pool)
+    return pool[0].key if pool else text, serialize_api_keys(pool) if pool else None
+
+
 def _cred_to_response(cred) -> CredentialResponse:
     preset = get_preset(cred.preset_id) if cred.preset_id != CUSTOM_SENTINEL_ID else None
+    pool = parse_api_keys(cred.api_keys, fallback_api_key=cred.api_key)
+    masked = [mask_secret(item.key) for item in pool]
     return CredentialResponse(
         id=cred.id,
         preset_id=cred.preset_id,
         display_name=cred.display_name,
         icon_key=preset.icon_key if preset else None,
         base_url=cred.base_url,
-        api_key_masked=mask_secret(cred.api_key),
+        api_key_masked=masked[0] if masked else mask_secret(cred.api_key),
+        api_key_count=len(pool),
+        api_keys_masked=masked,
+        key_rotation=len(pool) >= 2,
         model=cred.model,
         haiku_model=cred.haiku_model,
         sonnet_model=cred.sonnet_model,
@@ -178,17 +213,25 @@ async def create_credential(
         model = body.model
 
     repo = AgentCredentialRepository(session)
-    cred = await repo.create(
-        preset_id=body.preset_id,
-        display_name=display_name,
-        base_url=base_url,
-        api_key=body.api_key,
-        model=model,
-        haiku_model=body.haiku_model,
-        sonnet_model=body.sonnet_model,
-        opus_model=body.opus_model,
-        subagent_model=body.subagent_model,
-    )
+    try:
+        primary, keys_json = _resolve_keys_payload(api_key=body.api_key, api_keys=body.api_keys)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=_t("agent_api_key_required")) from exc
+    try:
+        cred = await repo.create(
+            preset_id=body.preset_id,
+            display_name=display_name,
+            base_url=base_url,
+            api_key=primary,
+            api_keys=keys_json,
+            model=model,
+            haiku_model=body.haiku_model,
+            sonnet_model=body.sonnet_model,
+            opus_model=body.opus_model,
+            subagent_model=body.subagent_model,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     # 自动 active 策略：activate=True，或 (activate=None 且当前无 active)
     should_activate = body.activate is True
     if body.activate is None:
@@ -216,9 +259,25 @@ async def update_credential(
     for required in ("display_name", "base_url", "api_key"):
         if fields.get(required) is None:
             fields.pop(required, None)
+    # 空 api_key 表示编辑时保持密钥不变
+    if fields.get("api_key") == "":
+        fields.pop("api_key", None)
+    if "api_key" in fields or "api_keys" in fields:
+        try:
+            primary, keys_json = _resolve_keys_payload(
+                api_key=fields.pop("api_key", None),
+                api_keys=fields.pop("api_keys", None),
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=_t("agent_api_key_required")) from exc
+        fields["api_key"] = primary
+        fields["api_keys"] = keys_json
     if not fields:
         raise HTTPException(status_code=400, detail=_t("agent_no_fields_to_update"))
-    cred = await repo.update(cred_id, **fields)
+    try:
+        cred = await repo.update(cred_id, **fields)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     if cred is None:
         raise HTTPException(status_code=404, detail=_t("agent_credential_not_found"))
     await session.commit()

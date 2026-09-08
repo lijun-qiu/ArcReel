@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import math
 from copy import deepcopy
 from dataclasses import dataclass
@@ -11,6 +12,8 @@ from lib.config.env_keys import ANTHROPIC_ENV_KEYS
 from lib.config.registry import PROVIDER_REGISTRY
 from lib.config.repository import ProviderConfigRepository, SystemSettingRepository
 from lib.db.repositories.credential_repository import CredentialRepository
+
+logger = logging.getLogger(__name__)
 
 _DEFAULT_VIDEO_BACKEND = "agnes/agnes-video-2.5-flash"
 _DEFAULT_IMAGE_BACKEND = "agnes/agnes-image-2.5-flash"
@@ -70,9 +73,11 @@ async def build_anthropic_env_dict(session: AsyncSession) -> dict[str, str]:
     返回值由 OptionsAssembler 的凭证注入（load_provider_env_overrides）注入到
     ClaudeAgentOptions.env。
 
+    多 key（≥2）时把 BASE_URL/API_KEY 指到进程内透传轮换器；单 key 直连上游。
     双轨期 fallback：active credential 字段为空时从 system_settings 兜底。
     """
     # 局部 import 避免循环依赖（agent_credential_repo → agent_credential model → base）
+    from lib.agent_key_pool import parse_api_keys
     from lib.db.repositories.agent_credential_repo import AgentCredentialRepository
 
     repo = AgentCredentialRepository(session)
@@ -80,9 +85,35 @@ async def build_anthropic_env_dict(session: AsyncSession) -> dict[str, str]:
 
     if cred is not None:
         settings = await SystemSettingRepository(session).get_all()
+        pool = parse_api_keys(cred.api_keys, fallback_api_key=cred.api_key)
+        upstream = (cred.base_url or "").strip()
+        if _looks_like_local_proxy_url(upstream):
+            logger.warning(
+                "agent credential base_url looks like a local proxy (%s); "
+                "prefer the real upstream (e.g. https://apihub.agnes-ai.com)",
+                upstream,
+            )
+
+        api_key = cred.api_key or ""
+        base_url = upstream
+        if len(pool) >= 2:
+            try:
+                from server.agent_runtime.anthropic_key_rotator import get_rotator
+
+                rotator = get_rotator()
+                api_key = rotator.proxy_token
+                base_url = rotator.base_url
+            except Exception as exc:
+                logger.warning(
+                    "anthropic key rotator unavailable (%s); falling back to first pool key",
+                    exc,
+                )
+                api_key = pool[0].key
+                base_url = upstream
+
         return {
-            "ANTHROPIC_API_KEY": cred.api_key or "",
-            "ANTHROPIC_BASE_URL": cred.base_url or "",
+            "ANTHROPIC_API_KEY": api_key,
+            "ANTHROPIC_BASE_URL": base_url,
             "ANTHROPIC_MODEL": cred.model or settings.get("anthropic_model", "").strip(),
             "ANTHROPIC_DEFAULT_HAIKU_MODEL": cred.haiku_model
             or settings.get("anthropic_default_haiku_model", "").strip(),
@@ -95,6 +126,11 @@ async def build_anthropic_env_dict(session: AsyncSession) -> dict[str, str]:
     # 无 active credential — 回退 system_settings（双轨期兼容）
     settings = await SystemSettingRepository(session).get_all()
     return {env_key: settings.get(db_key, "").strip() for db_key, env_key in _ANTHROPIC_ENV_MAP.items()}
+
+
+def _looks_like_local_proxy_url(url: str) -> bool:
+    lowered = url.lower()
+    return "host.docker.internal" in lowered or ":10002" in lowered or "127.0.0.1:" in lowered
 
 
 @dataclass
