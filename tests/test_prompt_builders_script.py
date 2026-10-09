@@ -337,6 +337,15 @@ class TestDramaDurationSpeechLowerBound:
 
     _SPEECH_MARKER = "口播语速约"
 
+    def test_prefers_shortest_adequate_over_packing_to_max(self):
+        """有默认时长时也不再鼓励「不要选最短档」；无默认时明确偏短够用。"""
+        with_default = self._normalize(default_duration=4, supported_durations=[4, 6, 8])
+        without_default = self._normalize(default_duration=None, supported_durations=[4, 6, 8])
+        assert "不要默认选最短档" not in with_default
+        assert "不要为填满时长而拉长" in with_default
+        assert "最短够用档" in without_default
+        assert "不要默认贴近最长档" in without_default
+
     def _normalize(self, **overrides) -> str:
         kwargs = dict(
             novel_text="【第1集】角色甲：「你好」",

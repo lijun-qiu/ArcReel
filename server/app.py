@@ -53,9 +53,12 @@ from server.routers import (
     cost_estimation,
     custom_providers,
     end_frames,
+    episode_previews,
     files,
     generate,
     grids,
+    local_indextts,
+    local_realesrgan,
     onboarding,
     presentations,
     products,
@@ -637,6 +640,18 @@ app.include_router(tasks.router, prefix="/api/v1", dependencies=[Depends(get_cur
 app.include_router(providers.router, prefix="/api/v1", dependencies=[Depends(get_current_user)], tags=["供应商管理"])
 app.include_router(system_config.router, prefix="/api/v1", dependencies=[Depends(get_current_user)], tags=["系统配置"])
 app.include_router(system.router, prefix="/api/v1", dependencies=[Depends(get_current_user)], tags=["系统"])
+app.include_router(
+    local_indextts.router,
+    prefix="/api/v1",
+    dependencies=[Depends(get_current_user)],
+    tags=["Local IndexTTS"],
+)
+app.include_router(
+    local_realesrgan.router,
+    prefix="/api/v1",
+    dependencies=[Depends(get_current_user)],
+    tags=["Local RealESRGAN"],
+)
 app.include_router(api_keys.router, prefix="/api/v1", dependencies=[Depends(get_current_user)], tags=["API Key 管理"])
 app.include_router(agent_chat.router, prefix="/api/v1", dependencies=[Depends(get_current_user)], tags=["Agent 对话"])
 app.include_router(agent_config.router, prefix="/api/v1", dependencies=[Depends(get_current_user)], tags=["Agent 配置"])
@@ -657,6 +672,12 @@ app.include_router(
     prefix="/api/v1",
     dependencies=[Depends(get_current_user), Depends(require_project_migration_ok)],
     tags=["参考生视频"],
+)
+app.include_router(
+    episode_previews.router,
+    prefix="/api/v1",
+    dependencies=[Depends(get_current_user), Depends(require_project_migration_ok)],
+    tags=["本集预览"],
 )
 app.include_router(assets.router, prefix="/api/v1", dependencies=[Depends(get_current_user)], tags=["全局资产库"])
 app.include_router(onboarding.router, prefix="/api/v1", dependencies=[Depends(get_current_user)], tags=["首次使用引导"])

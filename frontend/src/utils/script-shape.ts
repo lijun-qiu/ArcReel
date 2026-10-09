@@ -52,6 +52,79 @@ export function charactersFieldFor(mode: EditorContentMode): CharactersField {
   return "characters_in_segment";
 }
 
+/** 上一镜分镜衔接参考（与后端 resolve_previous_storyboard_path 几何规则同口径）。 */
+export interface PreviousStoryboardRef {
+  id: string;
+  path: string;
+}
+
+/**
+ * 解析当前镜头可用的上一镜分镜图路径。
+ *
+ * 首镜 / 当前镜 segment_break / 上一镜无 storyboard_image → null。
+ * 不读 use_previous_storyboard（那是「是否注入」开关，与「是否存在可展示的上一镜」分离）。
+ */
+export function resolvePreviousStoryboardRef(
+  items: readonly ScriptItem[],
+  mode: EditorContentMode,
+  resourceId: string,
+): PreviousStoryboardRef | null {
+  const index = items.findIndex((item) => getScriptItemId(item, mode) === resourceId);
+  if (index <= 0) return null;
+  const target = items[index];
+  if (!target || Boolean((target as { segment_break?: boolean }).segment_break)) return null;
+  const previous = items[index - 1];
+  if (!previous) return null;
+  const previousId = getScriptItemId(previous, mode).trim();
+  const path = previous.generated_assets?.storyboard_image;
+  if (!previousId || !path) return null;
+  return { id: previousId, path };
+}
+
+/** 缺省 false：存量无字段等同关闭；仅显式 true 时启用。 */
+export function itemUsesPreviousStoryboard(item: {
+  use_previous_storyboard?: boolean;
+}): boolean {
+  return item.use_previous_storyboard === true;
+}
+
+/** 时间线批量入口：全部重做 vs 只补缺。 */
+export type TimelineBatchSelection = "all" | "missing";
+
+/** 时间线批量入口：分镜图或成片。 */
+export type TimelineBatchKind = "storyboard" | "video";
+
+/**
+ * 选出本集时间线批量入队目标（剧本顺序）。
+ *
+ * - 分镜图：``all`` 全选；``missing`` 仅尚无 ``storyboard_image`` 的镜头。
+ * - 视频：必须已有分镜图；``all`` 含已有成片；``missing`` 仅尚无 ``video_clip``。
+ */
+export function selectTimelineBatchTargets(
+  script: EpisodeScript | null | undefined,
+  mode: EditorContentMode,
+  kind: TimelineBatchKind,
+  selection: TimelineBatchSelection,
+): string[] {
+  const items = getScriptItems(script, mode);
+  const targets: string[] = [];
+  for (const item of items) {
+    const id = getScriptItemId(item, mode).trim();
+    if (!id) continue;
+    const hasStoryboard = Boolean(item.generated_assets?.storyboard_image);
+    const hasVideo = Boolean(item.generated_assets?.video_clip);
+    if (kind === "storyboard") {
+      if (selection === "missing" && hasStoryboard) continue;
+      targets.push(id);
+      continue;
+    }
+    if (!hasStoryboard) continue;
+    if (selection === "missing" && hasVideo) continue;
+    targets.push(id);
+  }
+  return targets;
+}
+
 /**
  * 集总时长 = 逐条目 `duration_seconds` 求和。
  *

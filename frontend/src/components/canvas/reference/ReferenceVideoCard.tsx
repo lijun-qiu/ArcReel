@@ -29,7 +29,7 @@ function renderHighlightedTokens(
   tokens: Token[],
   caretOffset: number | null,
   setAnchorEl: (el: HTMLSpanElement | null) => void,
-  voiceoverLabel: string,
+  speechTitle: (token: Extract<Token, { kind: "speech" }>) => string,
 ): ReactNode {
   const out: ReactNode[] = [];
   let acc = 0;
@@ -60,7 +60,7 @@ function renderHighlightedTokens(
         <span
           key={key}
           className={`${MENTION_SPAN_CLASS} bg-[oklch(1_0_0_/_0.06)] ${tk.speaker ? palette.textClass : ""}`}
-          title={tk.speaker || voiceoverLabel}
+          title={speechTitle(tk)}
         >
           {sliceText}
         </span>
@@ -125,14 +125,22 @@ export function ReferenceVideoCard({
 
   const tokens = useUnitPromptHighlight(currentText, lookup);
 
-  const voiceoverLabel = t("script_highlight_voiceover");
+  const speechTitle = useCallback(
+    (token: Extract<Token, { kind: "speech" }>) => {
+      if (token.speechKind === "inner_monologue") {
+        return t("script_highlight_inner_monologue_of", { speaker: token.speaker });
+      }
+      return token.speaker || t("script_highlight_voiceover");
+    },
+    [t],
+  );
 
   // pickerOpen=false 是绝对多数路径（打字时 picker 只在 @ 触发短暂打开）。
   // tokens 已被 useUnitPromptHighlight memo 化，这里再把 tokens→ReactNode 列表缓存一层，
   // 父组件或其他 state 引起的 re-render 就不会重新跑 renderHighlightedTokens 的 forEach。
   const staticHighlightedNodes = useMemo(
-    () => renderHighlightedTokens(tokens, null, () => {}, voiceoverLabel),
-    [tokens, voiceoverLabel],
+    () => renderHighlightedTokens(tokens, null, () => {}, speechTitle),
+    [tokens, speechTitle],
   );
 
   const unknownMentions = useMemo(() => {
@@ -164,10 +172,26 @@ export function ReferenceVideoCard({
     const out = {} as Record<AssetKind, MentionCandidate[]>;
     for (const kind of ["product", "character", "scene", "prop"] as const) {
       const bucket = buckets[kind];
-      out[kind] = Object.entries(bucket ?? {}).map(([name, data]) => ({
-        name,
-        imagePath: (data as Partial<Record<(typeof SHEET_FIELD)[AssetKind], string>>)[SHEET_FIELD[kind]] ?? null,
-      }));
+      const items: MentionCandidate[] = [];
+      for (const [name, data] of Object.entries(bucket ?? {})) {
+        const entry = data as Partial<Record<(typeof SHEET_FIELD)[AssetKind], string>> & {
+          looks?: Record<string, { character_sheet?: string }>;
+        };
+        items.push({
+          name,
+          imagePath: entry[SHEET_FIELD[kind]] ?? null,
+        });
+        if (kind === "character" && entry.looks && typeof entry.looks === "object") {
+          for (const [lookId, lookEntry] of Object.entries(entry.looks)) {
+            if (lookId === "base" || !lookEntry || typeof lookEntry !== "object") continue;
+            items.push({
+              name: `${name}@${lookId}`,
+              imagePath: lookEntry.character_sheet ?? null,
+            });
+          }
+        }
+      }
+      out[kind] = items;
     }
     return out;
   }, [project?.products, project?.characters, project?.scenes, project?.props]);
@@ -299,7 +323,7 @@ export function ReferenceVideoCard({
           className="pointer-events-none absolute inset-0 m-0 overflow-hidden whitespace-pre-wrap break-words p-3 font-mono text-sm leading-6"
         >
           {pickerOpen
-            ? renderHighlightedTokens(tokens, atStart, setAnchorEl, voiceoverLabel)
+            ? renderHighlightedTokens(tokens, atStart, setAnchorEl, speechTitle)
             : staticHighlightedNodes}
           {currentText.endsWith("\n") ? "\u200b" : null}
         </pre>

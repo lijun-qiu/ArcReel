@@ -147,6 +147,22 @@ def test_character_dialogue_inner_monologue_and_offscreen_speech_share_character
     ]
 
 
+def test_drama_inner_monologue_kind_admits_as_character_speech() -> None:
+    result = SpeechComposition.prepare(
+        adapt_drama_scene(
+            {
+                "scene_id": "E1S02",
+                "utterances": [{"kind": "inner_monologue", "speaker": "阿离", "text": "他不会回来。"}],
+            }
+        )
+    )
+
+    assert result.mode is SpeechMode.CHARACTER_SPEECH
+    assert [(entry.owner, entry.speaker, entry.text) for entry in result.utterances] == [
+        (SpeechOwner.CHARACTER, "阿离", "他不会回来。")
+    ]
+
+
 def test_legacy_drama_dialogue_is_admitted_from_its_persisted_field() -> None:
     source = {
         "scene_id": "E1S02",

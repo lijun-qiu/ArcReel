@@ -125,6 +125,21 @@ describe("AgentCopilot", () => {
     expect(document.querySelector(`.${UI_LAYERS.assistantLocalPopover}`)).toBeTruthy();
   });
 
+  it("toggles composer boost text into the input", () => {
+    render(<AgentCopilot />);
+
+    const syncBoost = screen.getByRole("button", { name: "前台同步" });
+    fireEvent.click(syncBoost);
+
+    const textarea = screen.getByLabelText("智能体输入");
+    expect(textarea).toHaveValue("子任务前台同步，完成前不要结束回合。");
+    expect(syncBoost).toHaveAttribute("aria-pressed", "true");
+
+    fireEvent.click(syncBoost);
+    expect(textarea).toHaveValue("");
+    expect(syncBoost).toHaveAttribute("aria-pressed", "false");
+  });
+
   it("does not send when Enter is used to confirm an IME composition", () => {
     render(<AgentCopilot />);
 

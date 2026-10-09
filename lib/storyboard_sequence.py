@@ -8,6 +8,7 @@ from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
+from lib.asset_types import asset_name_comparison_key
 from lib.path_safety import safe_join, try_safe_join
 from lib.resource_paths import END_FRAME_RESOURCE_TYPE, resource_relative_path
 from lib.script_editor import resolve_items
@@ -162,6 +163,28 @@ def resolve_storyboard_video_inputs(
     return storyboard_file, end_frame_file
 
 
+def item_uses_previous_storyboard(item: dict) -> bool:
+    """镜头是否注入上一镜分镜图作衔接参考。
+
+    缺省 ``False``：存量剧本无字段等同关闭；仅显式 ``True`` 时注入。
+    """
+    return item.get("use_previous_storyboard") is True
+
+
+def character_names_on_item(item: dict, char_field: str | None) -> frozenset[str]:
+    """剧本条目上的角色名集合（按资产名比对坐标系归一），供上一镜去重。"""
+    if not char_field:
+        return frozenset()
+    raw = item.get(char_field) or []
+    if not isinstance(raw, (list, tuple)):
+        return frozenset()
+    return frozenset(
+        asset_name_comparison_key(name)
+        for name in raw
+        if isinstance(name, str) and name.strip()
+    )
+
+
 def resolve_previous_storyboard_path(
     project_path: Path,
     items: Sequence[dict],
@@ -218,12 +241,41 @@ def group_scenes_by_segment_break(items: list[dict], id_field: str) -> list[list
     return groups
 
 
+def previous_storyboard_dependency_resource_id(
+    items: Sequence[dict],
+    id_field: str,
+    resource_id: str,
+) -> str | None:
+    """若当前镜头会注入上一镜衔接参考，返回上一镜 resource_id；否则 ``None``。
+
+    与生成期注入口径一致：未启用 ``use_previous_storyboard``（缺省关闭）、首镜、或
+    ``segment_break`` 起镜都不依赖上一镜，可与其它分镜并行入队执行。
+    """
+    resolved = find_storyboard_item(items, id_field, resource_id)
+    if resolved is None:
+        return None
+    item, index = resolved
+    if index == 0 or bool(item.get("segment_break")) or not item_uses_previous_storyboard(item):
+        return None
+    previous_id = str(items[index - 1].get(id_field) or "").strip()
+    return previous_id or None
+
+
 def build_storyboard_dependency_plan(
     items: Sequence[dict],
     id_field: str,
     selected_ids: Iterable[str],
     script_file: str | None,
 ) -> list[StoryboardTaskPlan]:
+    """为选中的分镜规划排队依赖。
+
+    只要当前镜会用上一镜衔接参考，就写出 ``dependency_resource_id``（即使上一镜
+    不在本次选中集合里）——入队时再把它解析成 batch 内 task_id 或已在队列中的
+    active task。这样 Web 连点多镜 / Agent 批量都能串行等上一镜完成后再跑。
+
+    ``dependency_group`` 仍只覆盖「选中集合内连续、且彼此衔接」的子链，便于 UI
+    展示；跨 gap 的依赖不并入同一 group。
+    """
     selected_set = {str(item_id) for item_id in selected_ids}
     if not selected_set:
         return []
@@ -233,27 +285,23 @@ def build_storyboard_dependency_plan(
     current_group = ""
     current_group_index = 0
 
-    for index, item in enumerate(items):
+    for item in items:
         resource_id = str(item.get(id_field) or "").strip()
         if not resource_id or resource_id not in selected_set:
             continue
 
-        previous_resource_id: str | None = None
-        if index > 0:
-            previous_resource_id = str(items[index - 1].get(id_field) or "").strip() or None
-
-        starts_new_group = (
-            bool(item.get("segment_break")) or not previous_resource_id or previous_resource_id not in selected_set
+        dependency_resource_id = previous_storyboard_dependency_resource_id(items, id_field, resource_id)
+        previous_in_selection = bool(
+            dependency_resource_id and dependency_resource_id in selected_set
         )
+        starts_new_group = not previous_in_selection
 
         if starts_new_group:
             group_counter += 1
             current_group = f"{script_file or 'storyboard'}:group:{group_counter}"
             current_group_index = 0
-            dependency_resource_id = None
         else:
             current_group_index += 1
-            dependency_resource_id = previous_resource_id
 
         plans.append(
             StoryboardTaskPlan(

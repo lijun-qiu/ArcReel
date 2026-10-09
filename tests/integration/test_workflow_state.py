@@ -14,6 +14,7 @@ from lib.artifact_activation import (
 from lib.artifact_manifest import ArtifactBasisDescriptor, ArtifactKey, ProjectArtifactManifestAdapter
 from lib.asset_inventory import complete_asset_inventory
 from lib.episode_ledger import SOURCE_FINGERPRINTS_KEY, compute_source_fingerprints, discover_sources
+from lib.episode_wardrobe import complete_episode_wardrobe, episode_source_revision
 from lib.json_io import atomic_write_json
 from lib.narration_delivery import (
     TtsSynthesisSettings,
@@ -1993,6 +1994,53 @@ def test_reference_video_route_skips_storyboards_and_audio(tmp_path: Path) -> No
     assert status.artifacts["storyboards"]["state"] == "not_applicable"
     assert status.artifacts["audio"]["state"] == "not_applicable"
     assert status.next_action.requested_ids == ["E1U01"]
+
+
+@pytest.mark.integration
+def test_reference_video_requires_episode_wardrobe_before_step1(tmp_path: Path) -> None:
+    pm, project_path = _make_project(tmp_path, "drama", generation_mode="reference_video")
+    _write_source_and_complete(pm, project_path)
+    pm.update_project(
+        "demo",
+        lambda project: project.update(
+            episodes=[{"episode": 1, "script_file": "scripts/episode_1.json", "ledger_status": "planned"}]
+        ),
+    )
+    _write_episode_source(project_path, 1, "林北换上军大衣")
+
+    status = WorkflowStateService(pm).get_status("demo")
+
+    assert status.state == "STEP1_CONTENT"
+    assert status.next_action.type == "propose_character_looks"
+    assert "scenes" in status.next_action.reason
+    revision = episode_source_revision(project_path, 1)
+    assert revision == status.next_action.args["expected_episode_source_revision"]
+    complete_episode_wardrobe(pm, "demo", 1, revision, {})
+
+    after = WorkflowStateService(pm).get_status("demo")
+    assert after.next_action.type == "prepare_step1"
+
+
+@pytest.mark.integration
+def test_reference_video_look_sheets_gate_step1(tmp_path: Path) -> None:
+    pm, project_path = _make_project(tmp_path, "drama", generation_mode="reference_video")
+    _write_source_and_complete(pm, project_path)
+    pm.update_project(
+        "demo",
+        lambda project: project.update(
+            episodes=[{"episode": 1, "script_file": "scripts/episode_1.json", "ledger_status": "planned"}]
+        ),
+    )
+    _write_episode_source(project_path, 1, "林北战损")
+    pm.upsert_assets("demo", "characters", {"林北": {"description": "短发青年", "voice_style": ""}})
+    revision = episode_source_revision(project_path, 1)
+    assert revision is not None
+    complete_episode_wardrobe(pm, "demo", 1, revision, {"林北": {"战损": "军大衣破损"}})
+
+    status = WorkflowStateService(pm).get_status("demo")
+
+    assert status.next_action.type == "generate_asset_sheets"
+    assert status.next_action.requested_ids == ["林北", "林北__战损"]
 
 
 @pytest.mark.integration

@@ -23,6 +23,7 @@ import type {
   ReferenceGenerationRequestOptions,
 } from "@/types";
 import {
+  isResourceBusy,
   useTasksStore,
   type ImageEditResourceKind,
   type OptimisticHandle,
@@ -106,13 +107,16 @@ export async function enqueueStoryboard(
   segmentId: string,
   prompt: string | Record<string, unknown>,
   scriptFile: string,
+  options?: { notify?: boolean },
 ): Promise<EnqueueResult> {
   const res = await submit(
     [markResource(projectName, "storyboard", segmentId, "storyboard")],
     () => API.generateStoryboard(projectName, segmentId, prompt, scriptFile),
     oneTaskId,
   );
-  notifyEnqueued(res.deduped, i18n.t("dashboard:storyboard_task_submitted_toast", { id: segmentId }));
+  if (options?.notify !== false) {
+    notifyEnqueued(res.deduped, i18n.t("dashboard:storyboard_task_submitted_toast", { id: segmentId }));
+  }
   return { taskIds: [res.task_id], deduped: res.deduped };
 }
 
@@ -123,6 +127,7 @@ export async function enqueueVideo(
   scriptFile: string,
   durationSeconds?: number,
   requestOptions?: ReferenceGenerationRequestOptions,
+  options?: { notify?: boolean },
 ): Promise<EnqueueResult> {
   const res = await submit(
     [markResource(projectName, "video", segmentId, "video")],
@@ -131,7 +136,9 @@ export async function enqueueVideo(
       : API.generateVideo(projectName, segmentId, prompt, scriptFile, durationSeconds),
     oneTaskId,
   );
-  notifyEnqueued(res.deduped, i18n.t("dashboard:video_task_submitted_toast", { id: segmentId }));
+  if (options?.notify !== false) {
+    notifyEnqueued(res.deduped, i18n.t("dashboard:video_task_submitted_toast", { id: segmentId }));
+  }
   return { taskIds: [res.task_id], deduped: res.deduped };
 }
 
@@ -139,13 +146,16 @@ export async function enqueueNarration(
   projectName: string,
   segmentId: string,
   scriptFile: string,
+  options?: { notify?: boolean },
 ): Promise<EnqueueResult> {
   const res = await submit(
     [markResource(projectName, "tts", segmentId, "tts")],
     () => API.generateNarrationAudio(projectName, segmentId, scriptFile),
     oneTaskId,
   );
-  notifyEnqueued(res.deduped, i18n.t("dashboard:narration_task_submitted_toast", { id: segmentId }));
+  if (options?.notify !== false) {
+    notifyEnqueued(res.deduped, i18n.t("dashboard:narration_task_submitted_toast", { id: segmentId }));
+  }
   return { taskIds: [res.task_id], deduped: res.deduped };
 }
 
@@ -222,6 +232,66 @@ export async function enqueueProp(
   );
   notifyEnqueued(res.deduped, i18n.t("dashboard:prop_task_submitted_toast", { name }));
   return { taskIds: [res.task_id], deduped: res.deduped };
+}
+
+export type AssetSheetKind = "character" | "scene" | "prop";
+
+/**
+ * 一键入队多条尚无资产图的角色/场景/道具 sheet 生成。
+ * 已占用的资源跳过；全部跳过或清单为空时弹 info，不抛错。
+ */
+export async function enqueueAssetSheetsBatch(
+  projectName: string,
+  kind: AssetSheetKind,
+  items: ReadonlyArray<{ name: string; prompt: string }>,
+): Promise<{ taskIds: string[]; submitted: number; skippedBusy: number }> {
+  const eligible = items.filter(({ name }) => !isResourceBusy(kind, projectName, name));
+  const skippedBusy = items.length - eligible.length;
+  if (eligible.length === 0) {
+    useAppStore.getState().pushToast(
+      items.length === 0
+        ? i18n.t("dashboard:generate_all_sheets_none")
+        : i18n.t("dashboard:generate_all_sheets_all_busy"),
+      "info",
+    );
+    return { taskIds: [], submitted: 0, skippedBusy };
+  }
+
+  const requestOf = (name: string, prompt: string) => {
+    if (kind === "character") return API.generateCharacter(projectName, name, prompt);
+    if (kind === "scene") return API.generateProjectScene(projectName, name, prompt);
+    return API.generateProjectProp(projectName, name, prompt);
+  };
+
+  const settled = await Promise.allSettled(
+    eligible.map(async ({ name, prompt }) => {
+      const res = await submit(
+        [markResource(projectName, kind, name, kind)],
+        () => requestOf(name, prompt),
+        oneTaskId,
+      );
+      return res.task_id;
+    }),
+  );
+
+  const taskIds = settled.flatMap((r) => (r.status === "fulfilled" ? [r.value] : []));
+  const failed = settled.length - taskIds.length;
+  if (taskIds.length > 0) {
+    notifyEnqueued(
+      false,
+      i18n.t("dashboard:generate_all_sheets_submitted", { count: taskIds.length }),
+    );
+  }
+  if (failed > 0) {
+    useAppStore.getState().pushToast(
+      i18n.t("dashboard:generate_all_sheets_partial_failed", { count: failed }),
+      "error",
+    );
+  }
+  if (taskIds.length === 0 && failed === 0) {
+    useAppStore.getState().pushToast(i18n.t("dashboard:generate_all_sheets_none"), "info");
+  }
+  return { taskIds, submitted: taskIds.length, skippedBusy };
 }
 
 export async function enqueueProduct(

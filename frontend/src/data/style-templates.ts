@@ -27,9 +27,12 @@ export const STYLE_TEMPLATES: StyleTemplate[] = [
   { id: "live_wong",              category: "live", thumbnail: "/style-thumbnails/live_wong.png" },
   { id: "live_shaw",              category: "live", thumbnail: "/style-thumbnails/live_shaw.png" },
   { id: "live_cyberpunk",         category: "live", thumbnail: "/style-thumbnails/live_cyberpunk.png" },
-  // ===== 动画 (18) =====
+  // ===== 动画 (21) =====
   { id: "anim_3d_cg",             category: "anim", thumbnail: "/style-thumbnails/anim_3d_cg.png" },
   { id: "anim_cn_3d",             category: "anim", thumbnail: "/style-thumbnails/anim_cn_3d.png" },
+  { id: "anim_cn_short_drama",    category: "anim", thumbnail: "/style-thumbnails/anim_cn_short_drama.png" },
+  { id: "anim_cn_2d_drama",       category: "anim", thumbnail: "/style-thumbnails/anim_cn_2d_drama.png" },
+  { id: "anim_cn_idol_manhua",    category: "anim", thumbnail: "/style-thumbnails/anim_cn_idol_manhua.png" },
   { id: "anim_kyoto",             category: "anim", thumbnail: "/style-thumbnails/anim_kyoto.png" },
   { id: "anim_arcane",            category: "anim", thumbnail: "/style-thumbnails/anim_arcane.png" },
   { id: "anim_us_3d",             category: "anim", thumbnail: "/style-thumbnails/anim_us_3d.png" },

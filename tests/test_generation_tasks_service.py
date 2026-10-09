@@ -701,6 +701,7 @@ class TestGenerationTasks:
             ),
         )
 
+        fake_pm.script["segments"][1]["use_previous_storyboard"] = True
         storyboard_result = await generation_tasks.execute_storyboard_task(
             "demo",
             "E1S02",
@@ -789,6 +790,62 @@ class TestGenerationTasks:
             await generation_tasks.execute_generation_task(
                 {"task_type": "unknown", "project_name": "demo", "resource_id": "x", "payload": {}}
             )
+
+    @pytest.mark.unit
+    async def test_storyboard_skips_previous_ref_when_use_previous_storyboard_false(
+        self, tmp_path, monkeypatch
+    ):
+        project_path = _prepare_files(tmp_path)
+        fake_pm = _FakePM(project_path)
+        _register_asset_sheet_claims(fake_pm)
+        _seed_current_storyboard(fake_pm)
+        fake_pm.script["segments"][1]["use_previous_storyboard"] = False
+        fake_generator = _FakeGenerator(project_path)
+
+        monkeypatch.setattr(generation_tasks, "get_project_manager", lambda: fake_pm)
+        monkeypatch.setattr(generation_tasks, "resolve_generation_context", _fake_resolve_ctx(fake_generator))
+        monkeypatch.setattr(generation_tasks, "emit_project_change_batch", lambda *_a, **_k: None)
+
+        await generation_tasks.execute_storyboard_task(
+            "demo",
+            "E1S02",
+            {"script_file": "episode_1.json", "prompt": "direct prompt"},
+        )
+        labels = [
+            ref.get("label") if isinstance(ref, dict) else None
+            for ref in fake_generator.image_calls[0]["reference_images"]
+        ]
+        assert PREVIOUS_STORYBOARD_REFERENCE_LABEL not in labels
+        assert labels == ["Alice", "祠堂", "玉佩"]
+
+    @pytest.mark.unit
+    async def test_storyboard_skips_character_sheet_already_on_previous_shot(
+        self, tmp_path, monkeypatch
+    ):
+        """上一镜启用且上一镜已有该角色时，不再重复注入该角色资产图。"""
+        project_path = _prepare_files(tmp_path)
+        fake_pm = _FakePM(project_path)
+        _register_asset_sheet_claims(fake_pm)
+        _seed_current_storyboard(fake_pm)
+        fake_pm.script["segments"][0]["characters_in_segment"] = ["Alice"]
+        fake_pm.script["segments"][1]["use_previous_storyboard"] = True
+        fake_generator = _FakeGenerator(project_path)
+
+        monkeypatch.setattr(generation_tasks, "get_project_manager", lambda: fake_pm)
+        monkeypatch.setattr(generation_tasks, "resolve_generation_context", _fake_resolve_ctx(fake_generator))
+        monkeypatch.setattr(generation_tasks, "emit_project_change_batch", lambda *_a, **_k: None)
+
+        await generation_tasks.execute_storyboard_task(
+            "demo",
+            "E1S02",
+            {"script_file": "episode_1.json", "prompt": "direct prompt"},
+        )
+        labels = [
+            ref.get("label") if isinstance(ref, dict) else None
+            for ref in fake_generator.image_calls[0]["reference_images"]
+        ]
+        assert "Alice" not in labels
+        assert labels == ["祠堂", "玉佩", PREVIOUS_STORYBOARD_REFERENCE_LABEL]
 
     @pytest.mark.unit
     async def test_storyboard_registers_manifest_only_after_finalization_succeeds(self, tmp_path, monkeypatch):
@@ -1133,6 +1190,7 @@ class TestGenerationTasks:
         fake_pm.script["segments"][0]["generated_assets"] = {"storyboard_image": "storyboards/scene_E1S01.png"}
         fake_pm.script["segments"][1]["scenes"] = []
         fake_pm.script["segments"][1]["props"] = []
+        fake_pm.script["segments"][1]["use_previous_storyboard"] = True
         _persist_active_fake_project(fake_pm)
         character_path = project_path / "characters" / "Alice.png"
         previous_path = project_path / "storyboards" / "scene_E1S01.png"

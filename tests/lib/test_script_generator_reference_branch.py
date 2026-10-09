@@ -935,7 +935,7 @@ async def test_promote_step2_draft_after_repair(reference_project: Path):
 @pytest.mark.asyncio
 @pytest.mark.integration
 async def test_promote_step2_draft_reports_again_without_round_limit(reference_project: Path):
-    """再违约则刷新报告、草稿留在原地——可反复晋升，无收敛轮次上限。"""
+    """再违约则刷新报告、草稿留在原地；同一草稿最多晋升 5 次。"""
     gen = ScriptGenerator(reference_project, generator=_fake_step2_generator(BAD_STEP2_UNIT_TEXT))
     with pytest.raises(DraftViolation):
         await gen.generate(episode=1)

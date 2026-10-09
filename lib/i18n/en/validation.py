@@ -86,10 +86,10 @@ MESSAGES = {
     "val_duration_invalid": "{prefix}: invalid duration_seconds '{value}', must be a positive integer",
     # ---- drama utterances ----
     "val_utterance_must_be_object": "{prefix} must be an object",
-    "val_utterance_kind_invalid": "{prefix} kind must be dialogue or voiceover",
+    "val_utterance_kind_invalid": "{prefix} kind must be dialogue, inner_monologue, or voiceover",
     "val_utterance_text_invalid": "{prefix} text must be a non-empty string",
     "val_utterance_speaker_type": "{prefix} speaker must be a string or null",
-    "val_utterance_dialogue_speaker": "{prefix} dialogue must carry a non-empty speaker",
+    "val_utterance_dialogue_speaker": "{prefix} dialogue / inner_monologue must carry a non-empty speaker",
     "val_utterance_voiceover_speaker": "{prefix} voiceover must not carry a speaker",
     "val_scene_speech_overflow": (
         "{prefix}: estimated speech runs {spoken:.1f}s, exceeding the {duration}s scene duration by more than "

@@ -5,8 +5,9 @@
 台词语法（与 :mod:`lib.reference_video.text_parser` 的行内切分原语同源）：
 
 - ``@[角色]{台词}``（mention 与花括号之间允许空白或中英冒号）→ ``dialogue`` utterance
-- 裸 ``{台词}`` → ``voiceover`` utterance
-- 两者都可出现在行内任意位置，一行可有多条；花括号没被识别成发声记号时不派生、原样保留，
+- ``@[角色%内心独白]{台词}`` → ``inner_monologue`` utterance（角色音色心声，出镜亦闭嘴）
+- 裸 ``{台词}`` → ``voiceover`` utterance（旁白画外音）
+- 三者都可出现在行内任意位置，一行可有多条；花括号没被识别成发声记号时不派生、原样保留，
   只出 warning——不做「行内最近 mention 猜 speaker」启发式，推断错误会把台词静默绑到
   错误角色的参考音频上
 
@@ -43,6 +44,8 @@ WARN_REFERENCE_AUDIO_OVERFLOW = "ref_warn_reference_audio_overflow"
 WARN_SILENT_MODEL = "ref_warn_silent_model"
 WARN_SILENT_EPISODE = "ref_warn_silent_episode"
 WARN_SPEAKER_AUDIO_NEEDS_IMAGE = "ref_warn_speaker_audio_needs_image"
+#: 台词说话人未出现在画面 ``@[角色]`` mention 中，而出镜角色另有其人——口型易错绑到出镜脸上。
+WARN_OFFSCREEN_SPEECH_LIP_RISK = "ref_warn_offscreen_speech_lip_risk"
 
 
 @dataclass(frozen=True)
@@ -73,10 +76,12 @@ def derive_utterances(text: str) -> tuple[list[Utterance], list[dict[str, Any]]]
         for part in parts:
             if isinstance(part, str):
                 continue
-            if part.speaker:
-                utterances.append(Utterance(kind="dialogue", speaker=part.speaker, text=part.text))
-            else:
+            if part.kind == "voiceover":
                 utterances.append(Utterance(kind="voiceover", text=part.text))
+            else:
+                utterances.append(
+                    Utterance(kind=part.kind, speaker=part.speaker, text=part.text)
+                )
         rest = speech_line_description(parts)
         if rest.count("{") != rest.count("}"):
             warnings.append(_warning(WARN_UNCLOSED_BRACE, line=index, excerpt=line.strip()[:_EXCERPT_LEN]))
@@ -97,6 +102,83 @@ class VoiceBindings:
     speakers: list[str]
     audio_speakers: list[str]
     warnings: list[dict[str, Any]]
+
+
+@dataclass(frozen=True)
+class OffscreenSpeechLipGuard:
+    """画外说话 + 出镜脸并存时的口型错绑防护：预览 warning 与渲染约束共用同一份派生。
+
+    ``apply`` 为真时：预览发 ``WARN_OFFSCREEN_SPEECH_LIP_RISK``，渲染第三段注入闭嘴约束包；
+    ``mute_names`` 是出镜但未说台词的角色（首现顺序），渲染期逐名补「嘴唇紧闭」行。
+    """
+
+    apply: bool
+    mute_names: list[str] = field(default_factory=list)
+    warnings: list[dict[str, Any]] = field(default_factory=list)
+
+
+def derive_offscreen_speech_lip_guard(
+    text: str,
+    utterances: list[Utterance],
+    project: dict,
+) -> OffscreenSpeechLipGuard:
+    """机械判定是否需要出镜闭嘴约束。
+
+    判据（与参考图派生同口径：台词记号的说话人位不计入画面 mention）：
+
+    - ``dialogue_speakers``：开口台词说话人；
+    - ``monologue_speakers``：内心独白说话人；
+    - ``on_screen``：正文画面 mention 派生出的已登记角色；
+    - 画外开口 + 出镜脸，或任一内心独白与出镜脸并存 → 有风险。
+
+    ``mute_names`` = 出镜且**不是** dialogue speaker 的角色。内心独白说话人若同段还有
+    开口对白则**不**进本列（对白口型要放开）；心声瞬间的闭嘴由第二段就地附加句承担。
+    仅有心声、无 dialogue 的出镜说话人仍在此列。
+    """
+    registered, _missing = derive_references_from_text(text, project)
+    on_screen: list[str] = []
+    seen_on_screen: set[str] = set()
+    for ref in registered:
+        if ref.type != "character":
+            continue
+        name = asset_name_comparison_key(ref.name)
+        if name not in seen_on_screen:
+            seen_on_screen.add(name)
+            on_screen.append(name)
+
+    dialogue_speakers: list[str] = []
+    monologue_speakers: list[str] = []
+    seen_dialogue: set[str] = set()
+    seen_monologue: set[str] = set()
+    for entry in utterances:
+        speaker = asset_name_comparison_key(entry.speaker or "")
+        if not speaker:
+            continue
+        if entry.kind == "dialogue" and speaker not in seen_dialogue:
+            seen_dialogue.add(speaker)
+            dialogue_speakers.append(speaker)
+        elif entry.kind == "inner_monologue" and speaker not in seen_monologue:
+            seen_monologue.add(speaker)
+            monologue_speakers.append(speaker)
+
+    offscreen_dialogue = [name for name in dialogue_speakers if name not in seen_on_screen]
+    mute_names = [name for name in on_screen if name not in seen_dialogue]
+    apply = bool(on_screen) and (bool(offscreen_dialogue) or bool(monologue_speakers))
+    if not apply:
+        return OffscreenSpeechLipGuard(apply=False)
+
+    warning_speakers = offscreen_dialogue or monologue_speakers
+    return OffscreenSpeechLipGuard(
+        apply=True,
+        mute_names=mute_names,
+        warnings=[
+            _warning(
+                WARN_OFFSCREEN_SPEECH_LIP_RISK,
+                speakers="、".join(warning_speakers),
+                faces="、".join(on_screen),
+            )
+        ],
+    )
 
 
 def derive_voice_bindings(
@@ -244,5 +326,6 @@ def build_script_preview(
         speakers_with_reference_image=character_image_names,
     )
     warnings.extend(bindings.warnings)
+    warnings.extend(derive_offscreen_speech_lip_guard(text, utterances, project).warnings)
 
     return ScriptPreview(utterances=utterances, warnings=warnings)

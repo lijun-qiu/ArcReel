@@ -108,7 +108,7 @@ def test_explicit_provider_audio_off_preserves_file_but_disables_its_presentatio
     assert presentation.subtitles == ()
 
 
-def test_narrator_use_tts_overlays_both_tracks_at_unity_and_times_subtitles_to_tts() -> None:
+def test_narrator_use_tts_overlays_both_tracks_with_default_mix_gains_and_times_subtitles_to_tts() -> None:
     presentation = materialize_speech_presentation(
         _speech(
             SpeechMode.NARRATOR_VOICEOVER,
@@ -121,9 +121,9 @@ def test_narrator_use_tts_overlays_both_tracks_at_unity_and_times_subtitles_to_t
         provider_audio_enabled=True,
     )
 
-    assert presentation.video.gain == 1.0
+    assert presentation.video.gain == 0.0
     assert presentation.narration_audio is not None
-    assert presentation.narration_audio.gain == 1.0
+    assert presentation.narration_audio.gain == 0.7
     assert presentation.narration_audio.start_microseconds == 0
     assert presentation.narration_audio.duration_microseconds == 6_000_000
     # NFC turns A + combining acute into one code point, so weights are 1:2.

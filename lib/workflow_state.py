@@ -17,6 +17,7 @@ from lib import script_review
 from lib.artifact_activation import ArtifactCurrencyResolver
 from lib.artifact_manifest import ArtifactKey, ArtifactManifestError, ArtifactStatus
 from lib.asset_types import ASSET_SPECS, asset_name_comparison_key
+from lib.character_looks import LOOK_FILE_SEP, iter_character_sheet_targets, look_asset_id, parse_look_asset_id
 from lib.content_digest import prefixed_canonical_json_digest
 from lib.data_validator import DataValidator
 from lib.episode_ledger import (
@@ -28,6 +29,7 @@ from lib.episode_ledger import (
     normalize_source_text,
     parse_positive_episode_num,
 )
+from lib.episode_wardrobe import episode_source_revision, wardrobe_marker_matches
 from lib.project_manager import ProjectManager
 from lib.project_migration_failure import (
     MIGRATION_FAILURE_CODE,
@@ -104,6 +106,7 @@ class WorkflowActionType(StrEnum):
     COLLECT_PROJECT_INPUT = "collect_project_input"
     DRAFT_SELLING_POINTS = "draft_selling_points"
     ANALYZE_ASSETS = "analyze_assets"
+    PROPOSE_CHARACTER_LOOKS = "propose_character_looks"
     PLAN_EPISODES = "plan_episodes"
     RESET_EPISODE_PLANNING = "reset_episode_planning"
     PREPARE_STEP1 = "prepare_step1"
@@ -362,7 +365,17 @@ def _sheet_bearing_counts(assets: Mapping[str, ArtifactCount]) -> list[ArtifactC
 
 def _asset_bucket_total(project: Mapping[str, Any], bucket_key: str) -> int:
     bucket = project.get(bucket_key)
-    return len(bucket) if isinstance(bucket, Mapping) else 0
+    if not isinstance(bucket, Mapping):
+        return 0
+    if bucket_key != "characters":
+        return len(bucket)
+    total = 0
+    for name, item in bucket.items():
+        if isinstance(name, str) and isinstance(item, dict):
+            total += len(iter_character_sheet_targets(name, item))
+        elif isinstance(name, str):
+            total += 1
+    return total
 
 
 def _episodes_summary(episodes: list[EpisodeSummary]) -> EpisodesSummary:
@@ -537,18 +550,23 @@ class WorkflowStateService:
                     collection["current_ids"] = []
                     collection["missing_ids"] = []
                     break
-                path = item.get(spec.sheet_field)
-                if resolver is not None and isinstance(path, str) and path:
-                    self._classify_artifact(
-                        collection,
-                        resolver=resolver,
-                        key=ArtifactKey.asset_sheet(asset_type, asset_name_comparison_key(name)),
-                        artifact_path=path,
-                        resource_id=name,
-                        blockers=blockers,
-                    )
+                sheet_targets: list[tuple[str, object]]
+                if asset_type == "character" and isinstance(item, dict):
+                    sheet_targets = list(iter_character_sheet_targets(name, item))
                 else:
-                    collection["missing_ids"].append(name)
+                    sheet_targets = [(name, item.get(spec.sheet_field))]
+                for resource_id, path in sheet_targets:
+                    if resolver is not None and isinstance(path, str) and path:
+                        self._classify_artifact(
+                            collection,
+                            resolver=resolver,
+                            key=ArtifactKey.asset_sheet(asset_type, asset_name_comparison_key(resource_id)),
+                            artifact_path=path,
+                            resource_id=resource_id,
+                            blockers=blockers,
+                        )
+                    else:
+                        collection["missing_ids"].append(resource_id)
             collections[asset_type] = collection
         return collections
 
@@ -619,6 +637,55 @@ class WorkflowStateService:
                 args={"from_episode": 1},
             )
         return _action(WorkflowActionType.PLAN_EPISODES, reason)
+
+    @staticmethod
+    def _missing_look_sheet_ids(sheets: Mapping[str, Any]) -> list[str]:
+        """缺 sheet 的非 base look，以及这些角色仍缺的 base 图（base 排前）。"""
+
+        missing = list(sheets.get("character", {}).get("missing_ids") or [])
+        look_ids = [asset_id for asset_id in missing if LOOK_FILE_SEP in str(asset_id)]
+        if not look_ids:
+            return []
+        bases: list[str] = []
+        for asset_id in look_ids:
+            char_name, _look = parse_look_asset_id(str(asset_id))
+            base_id = look_asset_id(char_name, None)
+            if base_id in missing and base_id not in bases:
+                bases.append(base_id)
+        return [*bases, *look_ids]
+
+    def _reference_video_pre_step1_action(
+        self,
+        project: Mapping[str, Any],
+        project_path: Path,
+        target: WorkflowTarget,
+        sheets: Mapping[str, Any],
+    ) -> WorkflowNextAction | None:
+        """reference_video 在拆 unit 前：先完成本集造型/场景/道具完备审查，再补缺的 look 图。"""
+
+        if project.get("generation_mode") != "reference_video":
+            return None
+        live = episode_source_revision(project_path, target.episode)
+        if live is None:
+            return None
+        if not wardrobe_marker_matches(project, target.episode, live):
+            return _action(
+                WorkflowActionType.PROPOSE_CHARACTER_LOOKS,
+                "episode looks, scenes, and props must be reviewed before step1",
+                args={
+                    "episode": target.episode,
+                    "expected_episode_source_revision": live,
+                    "source": target.source,
+                },
+            )
+        missing_looks = self._missing_look_sheet_ids(sheets)
+        if missing_looks:
+            return _action(
+                WorkflowActionType.GENERATE_ASSET_SHEETS,
+                "registered looks need sheets before step1",
+                ids=missing_looks,
+            )
+        return None
 
     @staticmethod
     def _planning_complete(
@@ -1334,7 +1401,8 @@ class WorkflowStateService:
                     ):
                         artifacts["step1"] = {"state": "stale"}
                         state = "STEP1_CONTENT"
-                        next_action = _action(
+                        pre = self._reference_video_pre_step1_action(project, project_path, target, sheets)
+                        next_action = pre or _action(
                             WorkflowActionType.PREPARE_STEP1,
                             "target episode was replanned and its downstream artifacts are stale",
                             args={
@@ -1399,7 +1467,8 @@ class WorkflowStateService:
                         return self._response(project, source, target, state, blockers, gates, artifacts, next_action)
                     if artifacts["step1"]["state"] == "missing":
                         state = "STEP1_CONTENT"
-                        next_action = _action(
+                        pre = self._reference_video_pre_step1_action(project, project_path, target, sheets)
+                        next_action = pre or _action(
                             WorkflowActionType.PREPARE_STEP1,
                             "target episode has no formal step1",
                             args={"episode": target.episode, "preprocessor": preprocessor},

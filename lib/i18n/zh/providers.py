@@ -28,9 +28,10 @@ MESSAGES: dict[str, str] = {
     "provider_desc_kling": "快手可灵 Kling 视频与图像生成平台。API Key 鉴权适用于全部模型；Access Key + Secret Key（JWT）仅适用于 3.0 及更早模型，二者二选一，同时填写时 API Key 优先。",
     "provider_desc_agnes": "Agnes 多模态平台（OpenAI 风格），使用 Bearer API Key 鉴权；当前支持图像 / 文本 / 视频生成。",
     "provider_desc_openrouter": "OpenRouter 聚合免费文本模型。默认连接本机 key 注入代理（127.0.0.1:9999）；客户端 Key 使用 openrouter_proxy_injector_api_key。",
-    "provider_desc_modelscope": "魔搭 ModelScope API-Inference 免费文本。默认连接本机注入代理（127.0.0.1:10001）；客户端 Key 使用 modelscope_proxy_api_key。",
+    "provider_desc_modelscope": "魔搭 ModelScope API-Inference 免费文本（DeepSeek / 智谱 GLM）。默认连接本机 key 注入代理（127.0.0.1:10001）；客户端 Key 使用 modelscope_proxy_api_key。真实 ms-* 配在代理 .env.modelscope。",
     # Agent preset notes (lib/agent_provider_catalog.py)
     "preset_notes_deepseek": "DeepSeek 官方 Anthropic 兼容端点，需 sk- 开头的 API Key",
+    "preset_notes_modelscope": "魔搭 Agent 走本机 key 注入代理（默认 127.0.0.1:10001）。客户端填 modelscope_proxy_api_key；真实 ms-* 配在 openrouter-proxy-injector 的 .env.modelscope。",
     "preset_notes_agnes": "Agnes Anthropic 兼容 Messages API（apihub）；可用与图像/视频相同的 sk Key",
     "preset_notes_xiaomi_mimo": "小米 MiMo 仅支持已知模型名，未公开模型列表",
     "preset_notes_ark_coding_plan": "火山方舟 Coding Plan 套餐",

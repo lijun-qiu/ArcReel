@@ -12,12 +12,15 @@ import { errMsg } from "@/utils/async";
 import type { Character } from "@/types";
 import { GalleryEmptyState } from "./GalleryEmptyState";
 import { ONBOARDING_ANCHORS } from "@/onboarding/anchors";
+import { collectMissingCharacterSheetItems } from "@/utils/missing-asset-sheets";
 
 interface Props {
   projectName: string;
   characters: Record<string, Character>;
   onSaveCharacter: (name: string, payload: { description: string; voiceStyle: string; referenceFile?: File | null }) => Promise<void>;
   onGenerateCharacter: (name: string) => void;
+  onGenerateAllSheets?: () => void;
+  generateAllBusy?: boolean;
   onAddCharacter: (name: string, description: string, voiceStyle: string, referenceFile?: File | null) => Promise<void>;
   onRestoreCharacterVersion?: () => Promise<void> | void;
   onRefreshProject?: () => Promise<unknown> | void;
@@ -26,7 +29,7 @@ interface Props {
   readOnly?: boolean;
 }
 
-export function CharactersPage({ projectName, characters, onSaveCharacter, onGenerateCharacter, onAddCharacter, onRestoreCharacterVersion, onRefreshProject, generatingCharacterNames, readOnly = false }: Props) {
+export function CharactersPage({ projectName, characters, onSaveCharacter, onGenerateCharacter, onGenerateAllSheets, generateAllBusy = false, onAddCharacter, onRestoreCharacterVersion, onRefreshProject, generatingCharacterNames, readOnly = false }: Props) {
   const { t } = useTranslation(["dashboard", "assets"]);
   const [adding, setAdding] = useState(false);
   const [picking, setPicking] = useState(false);
@@ -34,6 +37,7 @@ export function CharactersPage({ projectName, characters, onSaveCharacter, onGen
   useScrollTarget("character");
 
   const entries = Object.entries(characters);
+  const missingSheetCount = collectMissingCharacterSheetItems(characters).length;
 
   const handleImport = async (ids: string[]) => {
     try {
@@ -58,6 +62,9 @@ export function CharactersPage({ projectName, characters, onSaveCharacter, onGen
         count={entries.length}
         onAdd={readOnly ? undefined : () => setAdding(true)}
         onPickFromLibrary={readOnly ? undefined : () => setPicking(true)}
+        onGenerateAll={readOnly ? undefined : onGenerateAllSheets}
+        generateAllBusy={generateAllBusy}
+        generateAllDisabled={missingSheetCount === 0}
       />
       <div className="px-5 py-5" data-onboarding={ONBOARDING_ANCHORS.workbenchLorebook}>
         {entries.length === 0 ? (

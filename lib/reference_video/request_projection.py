@@ -16,6 +16,7 @@ from typing import Protocol, cast
 from sqlalchemy.exc import SQLAlchemyError
 
 from lib.asset_types import ASSET_SPECS, AssetSpec, asset_name_comparison_key, normalize_asset_bucket
+from lib.character_looks import format_mention
 from lib.config.registry import (
     model_audio_switch_controllable,
     model_has_audio_track,
@@ -285,11 +286,11 @@ def hydrate_reference_assets(
 ) -> ReferenceAssetHydration:
     """把候选按声明范围过滤并给出实际可用图片与缺图逻辑引用。"""
 
-    declared_keys = {(ref.type, asset_name_comparison_key(ref.name)) for ref in declared}
+    declared_keys = {_ref_key(ref) for ref in declared}
     candidates = tuple(asset for asset in resolved_assets if _asset_key(asset) in declared_keys)
     available = tuple(asset for asset in candidates if availability.is_available(asset))
     available_keys = {_asset_key(asset) for asset in available}
-    missing = tuple(ref for ref in declared if (ref.type, asset_name_comparison_key(ref.name)) not in available_keys)
+    missing = tuple(ref for ref in declared if _ref_key(ref) not in available_keys)
     return ReferenceAssetHydration(available=available, missing=missing)
 
 
@@ -418,11 +419,13 @@ def unit_reference_declarations(project: dict, unit: dict) -> tuple[ReferenceRes
 def resolve_reference_assets(project: dict, project_path: Path, unit: dict) -> tuple[ResolvedReferenceAsset, ...]:
     """把正文派生的逻辑引用展开为图片候选，不把「路径已登记」误当成「文件存在」。
 
-    每件资产同一条规则：有资产图就用资产图，没有才退到该资产的全部原图。商品与其它资产
-    共用这条规则，不按类型排序、也不在有资产图时额外注入原图（见 ADR 0064 与 ADR 0034）。
-    缺字段、未登记或越界路径不制造候选，由 projector 对照派生引用统一产出
+    每件资产同一条规则：有资产图就用资产图，没有才退到该资产的全部原图。角色带造型时
+    按该造型的 sheet / 原图解析（见 ADR 0066）。商品与其它资产共用基线规则（ADR 0064 /
+    ADR 0034）。缺字段、未登记或越界路径不制造候选，由 projector 对照派生引用统一产出
     ``reference_asset_missing``。
     """
+
+    from lib.character_looks import resolve_look_original_paths, resolve_look_sheet_path
 
     result: list[ResolvedReferenceAsset] = []
     for reference in unit_reference_declarations(project, unit):
@@ -430,6 +433,17 @@ def resolve_reference_assets(project: dict, project_path: Path, unit: dict) -> t
         bucket = normalize_asset_bucket(project.get(spec.bucket_key))
         entry = bucket.get(asset_name_comparison_key(reference.name))
         if not isinstance(entry, dict):
+            continue
+        if reference.type == "character":
+            sheet_rel = resolve_look_sheet_path(entry, reference.look)
+            sheet = _candidate_path(project_path, sheet_rel) if sheet_rel else None
+            if sheet is not None:
+                result.append(ResolvedReferenceAsset(path=sheet, reference=reference, kind="sheet"))
+                continue
+            for raw_path in resolve_look_original_paths(entry, reference.look):
+                original = _candidate_path(project_path, raw_path)
+                if original is not None:
+                    result.append(ResolvedReferenceAsset(path=original, reference=reference, kind="original"))
             continue
         sheet = _candidate_path(project_path, entry.get(spec.sheet_field))
         if sheet is not None:
@@ -588,8 +602,12 @@ def _problem(code: str, *, blocking: bool, **params: object) -> ProjectionProble
     return ProjectionProblem(code=code, blocking=blocking, params=tuple(params.items()))
 
 
-def _asset_key(asset: ResolvedReferenceAsset) -> tuple[str, str]:
-    return asset.reference.type, asset_name_comparison_key(asset.reference.name)
+def _ref_key(ref: ReferenceResource) -> tuple[str, str, str]:
+    return ref.type, asset_name_comparison_key(ref.name), ref.look or ""
+
+
+def _asset_key(asset: ResolvedReferenceAsset) -> tuple[str, str, str]:
+    return _ref_key(asset.reference)
 
 
 def _planned_duration(unit: dict) -> int:
@@ -645,13 +663,15 @@ class ReferenceUnitRequestProjector:
                     )
                 )
         if hydration.missing:
-            missing = tuple((ref.type, ref.name) for ref in hydration.missing)
+            missing = tuple((ref.type, ref.name, ref.look) for ref in hydration.missing)
             problems.append(
                 _problem(
                     "reference_asset_missing",
                     blocking=True,
                     missing=missing,
-                    missing_text=", ".join(f"{asset_type}: {name}" for asset_type, name in missing),
+                    missing_text=", ".join(
+                        f"{asset_type}: {format_mention(name, look)}" for asset_type, name, look in missing
+                    ),
                 )
             )
 

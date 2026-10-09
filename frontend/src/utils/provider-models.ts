@@ -191,6 +191,16 @@ export function constrainDurations(
 export const IMAGE_STANDARD_RESOLUTIONS = ["512px", "1K", "2K", "4K"];
 export const VIDEO_STANDARD_RESOLUTIONS = ["480p", "720p", "1080p", "4K"];
 
+/**
+ * 新建 / 换模型时的分辨率偏好：优先 480p（吞吐更好），其次 720p，否则取候选首项。
+ * 选项为空时返回 null（与「未配置 → 执行期省略 resolution」同口径）。
+ */
+export function preferredVideoResolution(options: string[]): string | null {
+  if (options.includes("480p")) return "480p";
+  if (options.includes("720p")) return "720p";
+  return options[0] ?? null;
+}
+
 /** 项目里存了分辨率的两种形状：`model_settings` 以 `provider/model` 复合键，legacy 以裸 model_id。 */
 export interface ProjectResolutionSettings {
   model_settings?: Record<string, { resolution?: string | null }> | null;

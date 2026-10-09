@@ -18,7 +18,7 @@ from lib.artifact_version_provenance import (
     parse_typed_media_version_target,
 )
 from lib.project_manager import ProjectManager, resolve_episode_script_binding
-from lib.script_editor import resolve_items
+from lib.script_editor import ScriptEditError, resolve_items
 from lib.version_manager import VersionManager
 from server.services.reference_video_tasks import apply_unit_video_assets
 
@@ -200,8 +200,121 @@ def _apply_restored_asset(
     project_manager.update_scene_status(item)
 
 
+def _clear_script_media_assets(
+    *,
+    project_manager: ProjectManager,
+    script: dict[str, Any],
+    resource_type: str,
+    resource_id: str,
+) -> None:
+    """Null out generated media pointers after the sole current version is cleared."""
+
+    if resource_type == "reference_videos":
+        units = script.get("video_units")
+        if not isinstance(units, list):
+            raise ScriptEditError("video_units 必须是 list", key="script_edit_unit_lists_invalid")
+        for unit in units:
+            if not isinstance(unit, dict) or unit.get("unit_id") != resource_id:
+                continue
+            assets = unit.setdefault("generated_assets", {})
+            if not isinstance(assets, dict):
+                raise ScriptEditError(
+                    "generated_assets 必须是 dict", key="script_edit_generated_assets_invalid"
+                )
+            assets["video_clip"] = None
+            assets.pop("video_uri", None)
+            assets.pop("video_thumbnail", None)
+            assets.pop("video_generated_at", None)
+            assets["status"] = "pending"
+            return
+        raise KeyError(resource_id)
+
+    items, id_field, _kind = resolve_items(script)
+    item = next(
+        (
+            candidate
+            for candidate in items
+            if isinstance(candidate, dict) and str(candidate.get(id_field)) == str(resource_id)
+        ),
+        None,
+    )
+    if item is None:
+        raise KeyError(resource_id)
+    assets = item.get("generated_assets")
+    if not isinstance(assets, dict):
+        assets = ProjectManager.create_generated_assets(str(script.get("content_mode") or "narration"))
+        item["generated_assets"] = assets
+    if resource_type == "audio":
+        assets["narration_audio"] = None
+    else:
+        assets["video_clip"] = None
+        assets.pop("video_uri", None)
+        assets.pop("video_thumbnail", None)
+    project_manager.update_scene_status(item)
+
+
+def clear_typed_media_current_version(
+    *,
+    project_manager: ProjectManager,
+    project_name: str,
+    project_path: Path,
+    versions: VersionManager,
+    resource_type: str,
+    resource_id: str,
+    version: int,
+) -> dict[str, Any]:
+    """Delete the sole current typed media version and drop script/manifest claims.
+
+    History-only deletes stay on ``VersionManager.delete_version``. This path runs
+    when that delete also clears the live selection (``cleared_current``).
+    """
+
+    if not is_typed_media_restore_resource(resource_type):
+        raise ValueError(f"resource type does not support clearing current media: {resource_type}")
+
+    target = get_typed_media_restore_target(
+        versions,
+        resource_type=resource_type,
+        resource_id=resource_id,
+        version=version,
+    )
+    deleted: dict[str, Any] | None = None
+
+    def _same_script(project: dict[str, Any]) -> str:
+        current_binding = resolve_episode_script_binding(project, target.episode, target.script_file)
+        if current_binding is None:
+            raise ValueError("typed artifact version no longer matches the episode script binding")
+        return current_binding
+
+    def _delete_and_forget(_script_path: Path) -> None:
+        nonlocal deleted
+        deleted = versions.delete_version(resource_type, resource_id, version)
+        if not deleted.get("cleared_current"):
+            raise RuntimeError("expected sole-current clear when coordinating typed media delete")
+        key = _TYPED_MEDIA_ARTIFACT_KEYS[resource_type](target.episode, resource_id)
+        ArtifactManifest(ProjectArtifactManifestAdapter(project_path)).forget_entry_transactionally(key)
+
+    with project_manager.locked_episode_script(
+        project_name,
+        _same_script,
+        validate=False,
+        on_commit=_delete_and_forget,
+    ) as script:
+        _clear_script_media_assets(
+            project_manager=project_manager,
+            script=script,
+            resource_type=resource_type,
+            resource_id=resource_id,
+        )
+
+    if deleted is None:
+        raise RuntimeError("typed media clear completed without deleting a version")
+    return deleted
+
+
 __all__ = [
     "TypedMediaRestoreTarget",
+    "clear_typed_media_current_version",
     "get_typed_media_restore_target",
     "is_typed_media_restore_resource",
     "is_typed_media_version_restorable",

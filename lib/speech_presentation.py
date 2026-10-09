@@ -22,6 +22,7 @@ from lib.speech_artifact_provenance import (
     build_mechanical_subtitle_basis,
     build_presentation_basis,
     project_subtitle_utterances,
+    resolve_presentation_track_gains,
 )
 from lib.speech_composition import SpeechMode, SpeechOwner, SpeechPreparation
 
@@ -444,6 +445,10 @@ def materialize_speech_presentation(
     sources = (video,) if narration_audio is None else (video, narration_audio)
     selection: MediaSelection = "history" if any(source.selection == "history" for source in sources) else "current"
     currency: MediaCurrency = "stale" if any(source.currency == "stale" for source in sources) else "current"
+    video_gain, narration_gain = resolve_presentation_track_gains(
+        provider_audio_enabled=provider_audio_enabled,
+        has_narration_audio=narration_audio is not None,
+    )
     return SpeechPresentation(
         unit_id=preparation.unit_id,
         variant=variant,
@@ -455,14 +460,14 @@ def materialize_speech_presentation(
             start_microseconds=0,
             duration_microseconds=video_duration,
             audio_enabled=provider_audio_enabled,
-            gain=1.0 if provider_audio_enabled else 0.0,
+            gain=video_gain,
         ),
         narration_audio=(
             NarrationPresentationTrack(
                 media=narration_audio,
                 start_microseconds=0,
                 duration_microseconds=narration_duration,
-                gain=1.0,
+                gain=narration_gain if narration_gain is not None else 0.0,
             )
             if narration_audio is not None and narration_duration is not None
             else None

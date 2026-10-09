@@ -108,6 +108,13 @@ async def _get_or_create_backend(
             rate_limiter=rate_limiter,
         )
 
+    # Agnes 批量租钥时必须绕过共享缓存：否则多路任务会共用同一把冻结在 backend 上的 key。
+    if media_type == "video" and provider_name == "agnes":
+        from lib.agnes_video_key_lease import get_leased_api_key
+
+        if get_leased_api_key():
+            return await _factory()
+
     return await _backend_cache.get_or_create((media_type, provider_name, effective_model), _factory)
 
 

@@ -205,6 +205,13 @@ def test_asset_analysis_subagent_names_its_registered_tool() -> None:
     assert "mcp__arcreel__complete_asset_inventory" in content
 
 
+def test_episode_wardrobe_subagent_names_its_registered_tool() -> None:
+    content = (PROFILE / ".claude" / "agents" / "propose-character-looks.md").read_text(encoding="utf-8")
+
+    assert "complete_episode_wardrobe" in ARCREEL_MCP_TOOL_IDS
+    assert "mcp__arcreel__complete_episode_wardrobe" in content
+
+
 # ------------------------------------ Profile 物化：每个模式都拿到工作流 skill
 
 

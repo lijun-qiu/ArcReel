@@ -6,7 +6,7 @@ import {
   durationOutOfRangeReason,
   useModelCapabilities,
 } from "@/hooks/useModelCapabilities";
-import { lookupCatalogVideoAudio, lookupResolutions, lookupVideoAudioControl } from "@/utils/provider-models";
+import { lookupCatalogVideoAudio, lookupResolutions, lookupVideoAudioControl, preferredVideoResolution } from "@/utils/provider-models";
 import { isContinuousIntegerRange } from "@/utils/duration_format";
 import { ResolutionPicker } from "./ResolutionPicker";
 import {
@@ -188,16 +188,19 @@ export function ModelConfigSection({
       onChange(next);
       return;
     }
-    // 分辨率随模型切换一并重置为 null，故按 null 分辨率算新模型的时长候选。
+    // 分辨率随模型切换重置为偏好档（有 480p 优先，否则 720p），再按该档收窄时长候选。
+    const nextResolution = preferredVideoResolution(
+      lookupResolutions(providers, nextExecuting, customProviders, endpointToMediaType).options,
+    );
     const nextDurations = catalogDurations(providers, customProviders, nextExecuting, {
-      videoResolution: null,
+      videoResolution: nextResolution,
       usesReferenceImages,
     });
     const keepDuration = next.defaultDuration !== null && !!nextDurations?.includes(next.defaultDuration);
     onChange({
       ...next,
       defaultDuration: keepDuration ? next.defaultDuration : null,
-      videoResolution: null,
+      videoResolution: nextResolution,
     });
   };
 

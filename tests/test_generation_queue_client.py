@@ -546,6 +546,38 @@ class TestBatchEnqueueAndWaitSync:
         assert second_call.kwargs["dependency_group"] == "ep1:group:1"
         assert second_call.kwargs["dependency_index"] == 1
 
+    @patch("lib.generation_queue_client.get_active_tasks_for_resources", new_callable=AsyncMock)
+    @patch("lib.generation_queue_client.wait_for_task", new_callable=AsyncMock)
+    @patch("lib.generation_queue_client.enqueue_task_only", new_callable=AsyncMock)
+    def test_dependency_resolves_to_active_task_outside_batch(
+        self, mock_enqueue, mock_wait, mock_active
+    ):
+        """上一镜不在本批但已在队列中时，仍应挂上其 task_id 串行等待。"""
+        mock_active.return_value = [{"task_id": "already-running-prev"}]
+        mock_enqueue.return_value = {"task_id": "t-second"}
+        mock_wait.return_value = {"status": "succeeded", "result": {}}
+
+        specs = [
+            TaskSpec(
+                task_type="storyboard",
+                media_type="image",
+                resource_id="S02",
+                script_file="episode_1.json",
+                dependency_resource_id="S01",
+                dependency_group="ep1:group:1",
+                dependency_index=0,
+            ),
+        ]
+        batch_enqueue_and_wait_sync(project_name="demo", specs=specs)
+
+        mock_active.assert_awaited_once_with(
+            project_name="demo",
+            task_type="storyboard",
+            resource_ids=["S01"],
+            script_file="episode_1.json",
+        )
+        assert mock_enqueue.call_args.kwargs["dependency_task_id"] == "already-running-prev"
+
     @patch("lib.generation_queue_client.wait_for_task", new_callable=AsyncMock)
     @patch("lib.generation_queue_client.enqueue_task_only", new_callable=AsyncMock)
     def test_callbacks_invoked(self, mock_enqueue, mock_wait):

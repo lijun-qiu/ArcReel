@@ -51,6 +51,64 @@ export function mentionNameFromMatch(match: RegExpMatchArray): string {
   return normalizeSource(match[1] ?? match[2] ?? "");
 }
 
+/** 画面 mention：资产名 + 可选角色造型（undefined = 基准）。镜像后端 ParsedMention。 */
+export interface ParsedMention {
+  name: string;
+  look?: string;
+}
+
+/** 镜像后端 `INNER_MONOLOGUE_SUFFIX`：说话人 mention 内层末尾标记。 */
+export const INNER_MONOLOGUE_SUFFIX = "%内心独白";
+const INNER_MONOLOGUE_SEP = "%";
+
+export type SpeechKind = "dialogue" | "voiceover" | "inner_monologue";
+
+/** 剥掉内层末尾的 `%内心独白`；返回剩余内层与是否内心独白。镜像后端 `_strip_inner_monologue_suffix`。 */
+function stripInnerMonologueSuffix(raw: string): { remainder: string; isMonologue: boolean } {
+  const text = normalizeSource(raw);
+  if (text.endsWith(INNER_MONOLOGUE_SUFFIX)) {
+    return { remainder: text.slice(0, -INNER_MONOLOGUE_SUFFIX.length), isMonologue: true };
+  }
+  return { remainder: text, isMonologue: false };
+}
+
+/**
+ * 解析说话人 mention 内层：合法返回 `{ name, kind }`，非法 `%` 标记返回 null。
+ * 镜像后端 `parse_speech_speaker_token`。
+ */
+export function parseSpeechSpeakerToken(
+  raw: string,
+): { name: string; kind: Exclude<SpeechKind, "voiceover"> } | null {
+  const { remainder, isMonologue } = stripInnerMonologueSuffix(raw);
+  if (!isMonologue && remainder.includes(INNER_MONOLOGUE_SEP)) {
+    return null;
+  }
+  const { name } = splitMentionInner(remainder);
+  if (!name) return null;
+  return { name, kind: isMonologue ? "inner_monologue" : "dialogue" };
+}
+
+/** 把 `@[内层]` 拆成资产名与造型；仅按第一个 `@` 分割。内心独白后缀先剥掉再拆。 */
+export function splitMentionInner(raw: string): ParsedMention {
+  const { remainder } = stripInnerMonologueSuffix(raw);
+  const text = normalizeSource(remainder);
+  const at = text.indexOf("@");
+  if (at < 0) {
+    return { name: normalizeAssetName(text) };
+  }
+  const name = normalizeAssetName(text.slice(0, at));
+  const lookRaw = normalizeAssetName(text.slice(at + 1));
+  if (!lookRaw || lookRaw === "base") {
+    return { name };
+  }
+  return { name, look: lookRaw };
+}
+
+export function formatMention(name: string, look?: string | null): string {
+  if (!look || look === "base") return name;
+  return `${name}@${look}`;
+}
+
 /** 空台词（`{}` / `{   }`）不算发声记号——同后端：utterance 的 text 必须非空。 */
 function hasSpokenText(text: string): boolean {
   return text.trim().length > 0;
@@ -61,6 +119,7 @@ export interface SpeechMark {
   speaker: string;
   text: string;
   raw: string;
+  kind: SpeechKind;
 }
 
 /**
@@ -85,9 +144,10 @@ export function isSpeechMark(part: SpeechPart): part is SpeechMark {
  * `lib/reference_video/text_parser.py::split_speech_line`——两条派生路径同口径，
  * 改一侧必须同步改另一侧。
  *
- * 记号可出现在行内任意位置：`{台词}` 是画外音；紧接在 `@[角色]` 之后（中间允许空白或一个
- * 中英冒号）的 `{台词}` 是该角色说这句话。空台词、说话人位为空白、说话人位写坏
- * （`@[]{…}`、`@[张三]：：{…}`）三种一律不成记号，花括号留在描述片段里由调用侧出 warning。
+ * 记号可出现在行内任意位置：`{台词}` 是画外音；`@[角色]{台词}` 是开口台词；
+ * `@[角色%内心独白]{台词}` 是内心独白。空台词、说话人位为空白、说话人位写坏
+ * （`@[]{…}`、`@[张三]：：{…}`）、非法 `%` 标记一律不成记号，花括号留在描述片段里
+ * 由调用侧出 warning。
  *
  * 与后端的一处刻意差异：本函数**不归一源文本**，只归一取出的说话人名。高亮分词器要逐字
  * 拼回原文覆盖在 textarea 上，归一会让 token 拼不回去；判定路径（`extractMentions` /
@@ -101,7 +161,7 @@ export function splitSpeechLine(line: string): SpeechPart[] {
   const mentions = [...line.matchAll(MENTION_RE)].map((m) => ({
     start: m.index ?? 0,
     end: (m.index ?? 0) + m[0].length,
-    name: normalizeAssetName(mentionNameFromMatch(m)),
+    raw: mentionNameFromMatch(m),
   }));
   const parts: SpeechPart[] = [];
   let cursor = 0;
@@ -132,14 +192,17 @@ export function splitSpeechLine(line: string): SpeechPart[] {
     }
 
     let speaker = "";
+    let kind: SpeechKind = "voiceover";
     let start = open;
     const mention = mentions.find((m) => m.end === head && m.start >= cursor);
     if (mention) {
-      if (!mention.name) {
+      const parsed = parseSpeechSpeakerToken(mention.raw);
+      if (!parsed) {
         scan = close + 1;
         continue;
       }
-      speaker = mention.name;
+      speaker = parsed.name;
+      kind = parsed.kind;
       start = mention.start;
     } else if (
       head > cursor &&
@@ -151,7 +214,7 @@ export function splitSpeechLine(line: string): SpeechPart[] {
     }
 
     if (start > cursor) parts.push(line.slice(cursor, start));
-    parts.push({ speaker, text: inner, raw: line.slice(start, close + 1) });
+    parts.push({ speaker, text: inner, raw: line.slice(start, close + 1), kind });
     cursor = close + 1;
     scan = cursor;
   }
@@ -198,24 +261,36 @@ export function splitScriptLines(text: string): string[] {
 }
 
 /**
- * Mention names in first-appearance order, deduplicated — the reference-image
- * derivation. Mirrors `text_parser.py:extract_mentions`, including its rule that
- * **the speaker slot of a speech mark is excluded**: attaching a reference image to
- * a speaker would coax the model into drawing a character who only speaks off-screen.
- * 记号之外的 `@[名称]` 照常进参考图，同一行里两者并存。
- *
- * 名字一律是规范形，去重也按规范形——调用方直接拿去与已归一的资产表 key 判等，不再补归一。
+ * Mention names in first-appearance order, deduplicated — asset names only.
+ * Mirrors `text_parser.py:extract_mentions` (look suffix stripped). Speaker slots excluded.
  */
 export function extractMentions(text: string): string[] {
   const seen = new Set<string>();
   const out: string[] = [];
+  for (const mention of extractMentionRefs(text)) {
+    if (!seen.has(mention.name)) {
+      seen.add(mention.name);
+      out.push(mention.name);
+    }
+  }
+  return out;
+}
+
+/**
+ * 画面 `@` 引用（含造型），按 (名, look) 去重。镜像 `text_parser.extract_mention_refs`。
+ */
+export function extractMentionRefs(text: string): ParsedMention[] {
+  const seen = new Set<string>();
+  const out: ParsedMention[] = [];
   for (const raw of splitScriptLines(text)) {
     const line = stripSpeechMarks(raw);
     for (const m of line.matchAll(MENTION_RE)) {
-      const name = normalizeAssetName(mentionNameFromMatch(m));
-      if (!seen.has(name)) {
-        seen.add(name);
-        out.push(name);
+      const mention = splitMentionInner(mentionNameFromMatch(m));
+      if (!mention.name) continue;
+      const key = `${mention.name}\0${mention.look ?? ""}`;
+      if (!seen.has(key)) {
+        seen.add(key);
+        out.push(mention);
       }
     }
   }
@@ -275,7 +350,21 @@ export function buildMentionLookup(project: ProjectBuckets | null | undefined): 
     if (!Object.hasOwn(lookup, key)) lookup[key] = kind;
   };
   for (const name of Object.keys(project?.products ?? {})) claim(name, "product");
-  for (const name of Object.keys(project?.characters ?? {})) claim(name, "character");
+  for (const [name, entry] of Object.entries(project?.characters ?? {})) {
+    claim(name, "character");
+    // 衣橱造型与 MentionPicker 同口径：已登记 look 以「名@造型」进 lookup，
+    // 供高亮 / 未注册徽标按 formatMention 键解析（ADR 0066）。
+    const looks =
+      entry && typeof entry === "object"
+        ? (entry as { looks?: Record<string, unknown> }).looks
+        : undefined;
+    if (looks && typeof looks === "object") {
+      for (const lookId of Object.keys(looks)) {
+        if (lookId === "base") continue;
+        claim(formatMention(name, lookId), "character");
+      }
+    }
+  }
   for (const name of Object.keys(project?.scenes ?? {})) claim(name, "scene");
   for (const name of Object.keys(project?.props ?? {})) claim(name, "prop");
   return lookup;

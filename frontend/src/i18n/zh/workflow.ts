@@ -125,6 +125,7 @@ export default {
   'action_repair_project_data': '请智能体修复损坏的项目文件',
   'action_collect_project_input': '补齐故事原文与项目设置',
   'action_analyze_assets': '从原文中分析角色、场景与道具',
+  'action_propose_character_looks': '对照本集剧情审查并补登记造型 / 场景 / 道具',
   'action_reset_episode_planning': '重置分集规划，让新增原文进入排布',
   'action_plan_episodes': '规划分集',
   'action_draft_selling_points': '提炼卖点',

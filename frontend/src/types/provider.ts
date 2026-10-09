@@ -77,6 +77,19 @@ export interface ProviderTestResult {
   message: string;
 }
 
+export interface ModelScopePoolEntryPublic {
+  fingerprint: string;
+  suffix: string;
+  label?: string | null;
+  active?: boolean;
+}
+
+export interface ModelScopeKeyPoolResponse {
+  credential_id: number | null;
+  active_fingerprint: string | null;
+  entries: ModelScopePoolEntryPublic[];
+}
+
 export interface ProviderCredential {
   id: number;
   provider: string;
@@ -87,6 +100,11 @@ export interface ProviderCredential {
   // 逐字段独立脱敏的双 secret（可灵）；其余 provider 为 null/缺省
   access_key_masked?: string | null;
   secret_key_masked?: string | null;
+  /** Agnes / 魔搭 key 池：数量；其它供应商为 null/缺省 */
+  api_keys_count?: number | null;
+  api_keys_masked?: string[] | null;
+  /** 魔搭池条目（指纹 / 标签） */
+  modelscope_pool?: ModelScopePoolEntryPublic[] | null;
   is_active: boolean;
   created_at: string;
 }

@@ -173,4 +173,67 @@ describe("PropCard", () => {
     expect(screen.queryByTestId("version-time-machine")).toBeNull();
     expect(screen.queryByRole("button")).toBeNull();
   });
+
+  it("deletes prop after confirm", async () => {
+    const deleteSpy = vi.spyOn(API, "deleteProjectProp").mockResolvedValue({ success: true } as never);
+    const onReload = vi.fn().mockResolvedValue(undefined);
+    const pushToast = vi.spyOn(useAppStore.getState(), "pushToast");
+
+    render(
+      <PropCard
+        name="钥匙"
+        prop={prop}
+        projectName="demo"
+        onUpdate={vi.fn()}
+        onGenerate={vi.fn()}
+        onReload={onReload}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "删除" }));
+    // ConfirmDialog 打开后工具栏删除与确认按钮同文案，取 dialog 内最后一个
+    const deleteButtons = screen.getAllByRole("button", { name: "删除" });
+    fireEvent.click(deleteButtons[deleteButtons.length - 1]!);
+
+    await waitFor(() => {
+      expect(deleteSpy).toHaveBeenCalledWith("demo", "钥匙");
+    });
+    expect(onReload).toHaveBeenCalled();
+    expect(pushToast).toHaveBeenCalledWith("已删除「钥匙」", "success");
+  });
+
+  it("rejects delete when the resource is busy", async () => {
+    const deleteSpy = vi.spyOn(API, "deleteProjectProp");
+    const pushToast = vi.spyOn(useAppStore.getState(), "pushToast");
+    useTasksStore.setState({
+      tasks: [
+        makeTask({
+          project_name: "demo",
+          task_type: "prop",
+          media_type: "image",
+          resource_id: "A",
+          status: "running",
+        }),
+      ],
+    });
+
+    render(
+      <PropCard
+        name="A"
+        prop={prop}
+        projectName="demo"
+        onUpdate={vi.fn()}
+        onGenerate={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "删除" }));
+    const deleteButtons = screen.getAllByRole("button", { name: "删除" });
+    fireEvent.click(deleteButtons[deleteButtons.length - 1]!);
+
+    await waitFor(() => {
+      expect(pushToast).toHaveBeenCalledWith("生成或编辑进行中，暂无法删除该资产", "info");
+    });
+    expect(deleteSpy).not.toHaveBeenCalled();
+  });
 });

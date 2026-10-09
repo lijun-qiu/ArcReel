@@ -406,6 +406,29 @@ async def test_projection_exposes_declared_to_hydrated_bucket_change() -> None:
 
 
 @pytest.mark.asyncio
+async def test_projection_formats_missing_character_look_without_unpacking() -> None:
+    capabilities = _FakeCapabilities()
+    missing = Path("/fake/look.png")
+    projector = ReferenceUnitRequestProjector(capabilities, _FakeAssets({missing}))
+    unit = {"unit_id": "E1U1", "text": "@[林北@战损] 抬头。", "duration_seconds": 8}
+    asset = ResolvedReferenceAsset(
+        reference=ReferenceResource(type="character", name="林北", look="战损"),
+        path=missing,
+        kind="sheet",
+    )
+
+    result = await projector.project_current(
+        project={"characters": {"林北": {"looks": {"战损": {"description": "战损"}}}}},
+        script={"video_units": [unit]},
+        unit=unit,
+        resolved_assets=[asset],
+    )
+
+    problem = next(item for item in result.problems if item.code == "reference_asset_missing")
+    assert problem.parameters()["missing_text"] == "character: 林北@战损"
+
+
+@pytest.mark.asyncio
 async def test_projection_blocks_empty_duration_metadata_without_cost_facts() -> None:
     base = await _FakeCapabilities().resolve_candidate({}, "i2v")
 

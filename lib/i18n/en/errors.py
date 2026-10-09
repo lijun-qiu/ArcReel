@@ -114,6 +114,13 @@ MESSAGES = {
     "video_shorter_than_tts": "The generated video is {video_duration:.1f}s, shorter than the {tts_duration:.1f}s narration; regenerate it without truncating or speeding up speech",
     "audio_provider_not_configured": "Please configure an audio provider first: add a text-to-speech capable provider in Settings → Providers",
     "narration_speed_must_be_positive": "Narration speed must be a positive number",
+    "planning_setting_must_be_positive_integer": "{field} must be a positive integer, got: {value}",
+    "planning_split_mode_invalid": "planning_split_mode must be llm or markers, got: {value}",
+    "ad_no_episode_planning": "Ad/short projects do not support episode planning",
+    "plan_by_markers_needs_overwrite": "Episodes already exist; confirm overwrite and retry with overwrite=true",
+    "plan_by_markers_reset_confirmation": "Reset before marker split still requires confirmation for consumed episodes: {episodes}",
+    "plan_by_markers_failed": "Marker-based episode split failed",
+    "plan_by_markers_reset_failed": "Reset before marker-based episode split failed",
     "speech_rate_out_of_range": "Spoken pace must be between {min} and {max} (characters or words per second)",
     "character_not_found": "Character '{name}' does not exist",
     "character_task_submitted": "Character asset sheet generation task for '{name}' submitted",
@@ -171,6 +178,7 @@ MESSAGES = {
     "unknown_provider": "Unknown provider: {provider_id}",
     "max_workers_must_be_positive_integer": "{field} must be a positive integer, got: {value}",
     "credentials_not_found": "Credentials not found",
+    "modelscope_key_not_in_pool": "ModelScope key is not in the active credential pool",
     "vertex_json_read_failed": "Failed to read the uploaded file",
     "vertex_json_too_large": "Credentials file is too large",
     "vertex_json_invalid": "Invalid JSON credentials file",
@@ -283,6 +291,11 @@ MESSAGES = {
     "ref_episode_not_found": "Episode {episode} not found",
     "ref_not_reference_video_mode": "Episode script is not in reference-video mode",
     "ref_unit_not_found": "Video unit '{unit_id}' not found",
+    "ref_unit_no_video": "Video unit '{unit_id}' has no clip to upscale",
+    "ref_unit_video_missing": "Video file for unit '{unit_id}' is missing",
+    "realesrgan_proxy_unreachable": "Real-ESRGAN host proxy unreachable; run deploy/start_realesrgan_proxy.cmd -Supervisor on the host",
+    "realesrgan_output_missing": "Upscale finished but the output file is missing",
+    "episode_preview_not_found": "Episode {episode} preview has not been composed yet",
     "ref_unit_needs_replan": "This video unit has a speech-ownership or migration problem; replan it before generating",
     "ref_unit_ids_length_mismatch": "unit_ids count does not match existing units",
     "ref_duplicate_unit_ids": "unit_ids contains duplicates",
@@ -327,6 +340,12 @@ MESSAGES = {
         "Reference audio is disabled for this episode: no reference audio is uploaded and voice "
         "consistency does not apply; dialogue is used only as prompt context. Whether the rendered "
         "video actually has sound depends on the selected model"
+    ),
+    "ref_warn_offscreen_speech_lip_risk": (
+        "Character(s) '{speakers}' have off-screen dialogue or inner monologue, while on-screen "
+        "character(s) '{faces}' may get the wrong lip sync. Generation will require non-speaking "
+        "on-screen characters to keep their mouths closed (including on-screen monologue speakers); "
+        "you can also bring the speaking character into frame instead"
     ),
     # Episode meta
     "episode_not_found": "Episode {episode} not found or has no script file yet",
@@ -389,6 +408,7 @@ MESSAGES = {
     "grid_image_not_ready": "Multi-grid storyboard '{grid_id}' has no combined image yet; generate or upload one before splitting",
     "grid_generation_in_progress": "Multi-grid storyboard '{grid_id}' is being generated; wait for it to finish first",
     "version_not_found": "Version {version} does not exist",
+    "cannot_delete_current_version": "Cannot delete the current version v{version}; switch to another version first",
     "version_resource_not_found": "Resource '{resource_type}/{resource_id}' does not exist",
     "session_busy": "The session is busy; wait for the current reply to finish before sending",
     "session_capacity_exceeded": "Concurrent session limit reached, please try again later",
@@ -402,6 +422,10 @@ MESSAGES = {
     "overview_source_empty": "Source directory is empty; cannot generate overview",
     "text_provider_not_configured": "Please configure a text provider first: add at least one provider in Settings → Providers",
     "jianying_no_completed_segments": "Episode {episode} has no completed video clips; generate videos first",
+    "episode_preview_missing_clips": "Episode {episode} still has units without video ({unit_ids}); generate all clips before composing the preview",
+    "episode_preview_empty": "Episode {episode} has no units to compose into a preview",
+    "episode_preview_ffmpeg_unavailable": "Cannot compose preview: ffmpeg / ffprobe is not available on this machine",
+    "episode_preview_failed": "Failed to compose the episode preview; please try again",
     "presentation_unavailable": "The selected video presentation is unavailable or no longer fits its media boundary",
     "project_config_invalid": "Invalid project configuration; check the parameters and retry",
     "invalid_discovery_format": "Unsupported model discovery format: {discovery_format}",

@@ -748,6 +748,25 @@ class TaskRepository(BaseRepository):
         await self.session.execute(update(Task).where(Task.task_id == task_id).values(**values))
         await self.session.commit()
 
+    async def update_running_error_message(self, task_id: str, error_message: str | None) -> int:
+        """在 running 任务上写/清进度提示（如 Agnes 排队重试），不改变 status。
+
+        仅 ``status='running'`` 时更新；返回受影响行数。不发终态事件——中间态靠前端轮询可见。
+        """
+        now = utc_now()
+        message = None if error_message is None else bound_reason(error_message, _MAX_ERROR_MESSAGE_LEN)
+        result = await self.session.execute(
+            update(Task)
+            .where(Task.task_id == task_id, Task.status == "running")
+            .values(error_message=message, updated_at=now)
+        )
+        affected = rowcount(result)
+        if affected == 0:
+            await self.session.rollback()
+            return 0
+        await self.session.commit()
+        return affected
+
     async def persist_execution_checkpoint(self, task_id: str, checkpoint_json: str, provider_id: str) -> None:
         """Persist the once-only pre-submit checkpoint and actual provider atomically.
 

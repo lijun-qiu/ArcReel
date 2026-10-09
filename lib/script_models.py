@@ -250,6 +250,11 @@ class NarrationSegment(BaseModel):
     # 以下字段对 LLM 隐藏（SkipJsonSchema）：note 是人工备注、generated_assets 是 post-LLM 运行时状态。
     # 仍保留在 Pydantic 模型里以便存储 / 校验，但不出现在 response_schema 中，避免 LLM 填污染数据。
     note: SkipJsonSchema[str | None] = Field(default=None, description="用户备注（不参与生成）")
+    # 是否在分镜生成时注入上一镜分镜图作衔接参考。缺省 False（存量剧本无字段等同关闭）；
+    # 仅 Web UI 可改，对 LLM 隐藏。
+    use_previous_storyboard: SkipJsonSchema[bool] = Field(
+        default=False, description="分镜生成是否使用上一镜分镜图作衔接参考"
+    )
     # 尾帧快照的项目内相对路径（``end_frames/scene_{id}.png``）。用户意图而非运行时产出，
     # 故不进 generated_assets；只由尾帧设置/清除端点写入（通用 PATCH 白名单不含此字段，
     # 避免绕过快照复制写出悬空引用或越界路径），整集剧本重生成不保留（同 note 口径）。
@@ -371,16 +376,16 @@ class NarrationVisualEpisodeScript(BaseModel):
 # ============ 剧集动画模式（Drama） ============
 
 
-UtteranceKind = Literal["dialogue", "voiceover"]
+UtteranceKind = Literal["dialogue", "voiceover", "inner_monologue"]
 
 
 class Utterance(BaseModel):
-    """drama 场景级有序发声条目：插入顺序即幕内时序（台词与画外音的先后）。
+    """drama / 参考生视频 有序发声条目：插入顺序即幕内时序。
 
     判别式联合 ``{kind, speaker, text}``，``kind`` 决定下游路由与 ``kind ⇄ speaker`` 约束：
-    - ``dialogue``：人物发声（对白、内心独白、人物画外解说），必带非空 ``speaker``，
-      进视频 YAML 交供应商出口型音轨；
-    - ``voiceover``：无说话人的旁白解说，``speaker`` 必为 ``None``，不作视频提示词（留给字幕 / TTS）。
+    - ``dialogue``：人物开口发声（对白、画外开口），必带非空 ``speaker``，可出口型；
+    - ``inner_monologue``：人物内心独白，必带非空 ``speaker``，挂角色音色但不出说话口型；
+    - ``voiceover``：无说话人的旁白解说，``speaker`` 必为 ``None``（参考生视频里裸 ``{…}``）。
 
     取显式 ``kind`` 而非「speaker 有无隐式判别」：与 ``ReferenceResource.type`` 既有判别式风格一致、
     LLM 结构化输出更稳（见 ADR 0040）。
@@ -388,8 +393,13 @@ class Utterance(BaseModel):
 
     model_config = _STRICT_CONFIG
 
-    kind: UtteranceKind = Field(description="发声类型：dialogue=带角色归属的人物发声、voiceover=无角色归属的叙述旁白")
-    speaker: str | None = Field(default=None, description="说话角色名；dialogue 必填非空、voiceover 必须为 null")
+    kind: UtteranceKind = Field(
+        description="发声类型：dialogue=开口台词、inner_monologue=内心独白、voiceover=无角色旁白"
+    )
+    speaker: str | None = Field(
+        default=None,
+        description="说话角色名；dialogue / inner_monologue 必填非空、voiceover 必须为 null",
+    )
     text: str = Field(description="发声内容原文，逐字保留")
 
     @model_validator(mode="before")
@@ -405,9 +415,9 @@ class Utterance(BaseModel):
 
     @model_validator(mode="after")
     def _check_kind_speaker(self) -> "Utterance":
-        if self.kind == "dialogue":
+        if self.kind in ("dialogue", "inner_monologue"):
             if not self.speaker:
-                raise ValueError("dialogue utterance 必须带非空 speaker")
+                raise ValueError(f"{self.kind} utterance 必须带非空 speaker")
         elif self.speaker is not None:
             raise ValueError("voiceover utterance 不得带 speaker")
         return self
@@ -502,6 +512,9 @@ class DramaScene(BaseModel):
     transition_to_next: SkipJsonSchema[TransitionType] = Field(default="cut", description="转场类型")
     # 见 NarrationSegment 同名字段说明。
     note: SkipJsonSchema[str | None] = Field(default=None, description="用户备注（不参与生成）")
+    use_previous_storyboard: SkipJsonSchema[bool] = Field(
+        default=False, description="分镜生成是否使用上一镜分镜图作衔接参考"
+    )
     end_frame_image: SkipJsonSchema[str | None] = Field(default=None, description="尾帧快照路径（项目内相对路径）")
     generated_assets: SkipJsonSchema[GeneratedAssets] = Field(
         default_factory=GeneratedAssets, description="生成资源状态"
@@ -696,6 +709,9 @@ class AdShot(BaseModel):
     transition_to_next: SkipJsonSchema[TransitionType] = Field(default="cut", description="转场类型")
     # 见 NarrationSegment 同名字段说明。
     note: SkipJsonSchema[str | None] = Field(default=None, description="用户备注（不参与生成）")
+    use_previous_storyboard: SkipJsonSchema[bool] = Field(
+        default=False, description="分镜生成是否使用上一镜分镜图作衔接参考"
+    )
     end_frame_image: SkipJsonSchema[str | None] = Field(default=None, description="尾帧快照路径（项目内相对路径）")
     generated_assets: SkipJsonSchema[GeneratedAssets] = Field(
         default_factory=GeneratedAssets, description="生成资源状态"
@@ -793,16 +809,21 @@ def script_duration_total(kind: str, items: object) -> int:
 
 
 class ReferenceResource(BaseModel):
-    """参考图引用——只存名称 + 类型，具体路径从 project.json 对应 bucket 读时解析。
+    """参考图引用——只存名称 + 类型（角色可带造型），具体路径从 project.json 读时解析。
 
-    执行期派生物，不落盘：视频单元只持久化正文，参考图由正文的 ``@[名称]`` 在渲染与请求
-    投影时解析（见 :func:`lib.reference_video.text_parser.derive_references_from_text`）。
+    执行期派生物，不落盘：视频单元只持久化正文，参考图由正文的 ``@[名称]`` /
+    ``@[角色@造型]`` 在渲染与请求投影时解析（见 ADR 0064 / ADR 0066）。
+    ``look`` 仅对 character 有意义；``None`` 表示基准造型。
     """
 
     model_config = _STRICT_CONFIG
 
     type: Literal["product", "character", "scene", "prop"] = Field(description="引用的资源类型")
     name: str = Field(description="产品/角色/场景/道具名称，必须在 project.json 对应 bucket 中已注册")
+    look: str | None = Field(
+        default=None,
+        description="角色衣橱造型 id；仅 character 使用，None 表示基准造型",
+    )
 
 
 class ReferenceVideoUnit(BaseModel):

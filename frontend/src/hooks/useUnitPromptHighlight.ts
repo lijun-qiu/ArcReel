@@ -3,9 +3,10 @@ import type { MentionKind } from "@/components/canvas/reference/asset-colors";
 import {
   LINE_BREAK_RE,
   MENTION_RE,
+  formatMention,
   isSpeechMark,
   mentionNameFromMatch,
-  normalizeAssetName,
+  splitMentionInner,
   splitScriptLines,
   splitSpeechLine,
   type MentionLookup,
@@ -33,14 +34,20 @@ import {
 export type { MentionLookup } from "@/utils/reference-mentions";
 
 /**
- * `speech` 是解析器认出的发声记号（`@[角色]{台词}` / `{台词}`）。`text` 恒为它在原文里
- * 占据的整段原文（含 `@[名称]` 与花括号），token 序列因此仍能逐字拼回原文；`speaker`
- * 为空串即画外音。台词正文不单列一个字段——渲染层要的是原文整段，拆出来无人消费。
+ * `speech` 是解析器认出的发声记号（`@[角色]{台词}` / `@[角色%内心独白]{台词}` / `{台词}`）。
+ * `text` 恒为它在原文里占据的整段原文（含 `@[名称]` 与花括号），token 序列因此仍能逐字拼回原文；
+ * `speaker` 为空串即画外音。台词正文不单列一个字段——渲染层要的是原文整段，拆出来无人消费。
  */
 export type Token =
   | { kind: "text"; text: string }
   | { kind: "mention"; text: string; name: string; assetKind: MentionKind }
-  | { kind: "speech"; text: string; speaker: string; speakerKind: MentionKind };
+  | {
+      kind: "speech";
+      text: string;
+      speaker: string;
+      speakerKind: MentionKind;
+      speechKind: "dialogue" | "voiceover" | "inner_monologue";
+    };
 
 export function tokenizePrompt(text: string, lookup: MentionLookup): Token[] {
   if (text.length === 0) return [];
@@ -75,6 +82,7 @@ function pushLineTokens(out: Token[], text: string, lookup: MentionLookup): void
       text: part.raw,
       speaker: part.speaker,
       speakerKind: speakerKindOf(part.speaker, lookup),
+      speechKind: part.kind,
     });
   }
 }
@@ -91,7 +99,9 @@ function pushMentionTokens(out: Token[], text: string, lookup: MentionLookup): v
     if (idx > lastIdx) {
       out.push({ kind: "text", text: text.slice(lastIdx, idx) });
     }
-    const name = normalizeAssetName(mentionNameFromMatch(m));
+    // 内层可能是「角色@造型」：拆开后再按 formatMention 键查 lookup（含已登记 look）。
+    const mention = splitMentionInner(mentionNameFromMatch(m));
+    const name = formatMention(mention.name, mention.look);
     // hasOwn 而非直接下标：`toString` 等原型链属性是合法资产名，未登记时下标会取到
     // Object.prototype 上的函数并被当成已解析的类型。
     const resolved = Object.hasOwn(lookup, name) ? lookup[name] : undefined;
@@ -125,9 +135,9 @@ export function useUnitPromptHighlight(text: string, lookup: MentionLookup): Tok
  * textarea; this one groups by line so the preview can set apart the lines the
  * parser actually recognized as utterances.
  *
- * 整行除空白外只有一个发声记号时才独占一条 `dialogue` / `voiceover`；记号与描述混写的行
- * 归 `text`，记号作为 `speech` token 在行内就地着色。缩进与行尾空白不影响这一判定——
- * 后端按行解析时同样先 strip 再判，缩进写的台词两侧都是台词。
+ * 整行除空白外只有一个发声记号时才独占一条 `dialogue` / `inner_monologue` / `voiceover`；
+ * 记号与描述混写的行归 `text`，记号作为 `speech` token 在行内就地着色。缩进与行尾空白不
+ * 影响这一判定——后端按行解析时同样先 strip 再判，缩进写的台词两侧都是台词。
  *
  * `sourceLine` is the 0-based raw line index (`splitScriptLines` order — one entry per
  * physical line), the same coordinate system as the backend's `DraftViolation.line`
@@ -135,6 +145,13 @@ export function useUnitPromptHighlight(text: string, lookup: MentionLookup): Tok
  */
 export type ScriptLine =
   | { kind: "dialogue"; sourceLine: number; speaker: string; speakerKind: MentionKind; text: string }
+  | {
+      kind: "inner_monologue";
+      sourceLine: number;
+      speaker: string;
+      speakerKind: MentionKind;
+      text: string;
+    }
   | { kind: "voiceover"; sourceLine: number; text: string }
   | { kind: "text"; sourceLine: number; tokens: Token[] };
 
@@ -150,7 +167,15 @@ export function toScriptLines(text: string, lookup: MentionLookup): ScriptLine[]
       marks.length === 1 && parts.every((part) => isSpeechMark(part) || part.trim() === "") ? marks[0] : null;
 
     if (only) {
-      if (only.speaker) {
+      if (only.kind === "inner_monologue") {
+        lines.push({
+          kind: "inner_monologue",
+          sourceLine,
+          speaker: only.speaker,
+          speakerKind: speakerKindOf(only.speaker, lookup),
+          text: only.text,
+        });
+      } else if (only.speaker) {
         lines.push({
           kind: "dialogue",
           sourceLine,

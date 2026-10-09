@@ -87,6 +87,14 @@ def test_build_reference_video_prompt_structures_shot_text_by_four_elements():
         assert element in prompt
 
 
+def test_build_reference_video_prompt_guides_readable_prop_content_framing():
+    """需看清手机 / 电脑 / 纸条等道具内容时，指引过肩或侧脸落到道具，避免屏幕正对镜头反打。"""
+    prompt = _step2_prompt()
+    assert "过肩" in prompt
+    assert "纸条" in prompt
+    assert "正对镜头" in prompt
+
+
 def test_build_reference_video_prompt_states_structure_preserving_contract():
     """step2 的职责是视觉展开：unit 数与台词两项保结构要求必须写进 prompt。"""
     prompt = _step2_prompt()
@@ -125,12 +133,49 @@ def test_build_reference_units_split_prompt_contains_constraints_and_candidates(
     assert "12 秒" in prompt
     assert "不超过 3 个" in prompt
     assert "默认取 4 秒" in prompt
-    # 关键写作纪律
+    # 正文写作纪律
     assert "@[名称]" in prompt
     assert "外貌" in prompt
     # step1 的内容契约三件：原文锚、台词落位、语速下界
     assert "source_text" in prompt
     assert "口播语速约" in prompt
+    assert "禁止用口型" in prompt
+    assert "发声相关行为" in prompt
+    # unit 边界：独立成片、连续场景不跨 unit、超最长档才拆且仍各自独立
+    assert "无跨 unit 画面衔接" in prompt
+    assert "动作在本 unit 内收完" in prompt
+    assert "彼此独立" in prompt
+
+
+def test_reference_prompts_restate_visible_state_when_character_returns():
+    """同一角色再出场时重述上一 unit 仍成立的姿态/位置/手持；不继承末帧，不写外貌。"""
+    for prompt in (_split_prompt(), _step2_prompt()):
+        assert "上一 unit 收束时仍成立的姿态、位置或手持" in prompt
+        assert "不继承末帧或机位" in prompt
+        assert "不写外貌、服装、妆伤" in prompt
+
+
+def test_build_reference_units_split_prompt_balances_speech_and_visual_duration():
+    """时长节奏：满足台词/节拍下界后少碎合并，禁止注水与无必要碎切。"""
+    with_default = _split_prompt(
+        supported_durations=[4, 6, 8, 12],
+        max_duration=12,
+        default_duration=4,
+    )
+    without_default = _split_prompt(
+        supported_durations=[4, 6, 8, 12],
+        max_duration=12,
+        default_duration=None,
+    )
+    for prompt in (with_default, without_default):
+        assert "画面节拍下界" in prompt
+        assert "约每 1.5 秒" in prompt
+        assert "少碎优先" in prompt
+        assert "禁止为「塞满」时长而注水" in prompt
+        assert "禁止为「镜头感」把本可合并的内容拆碎" in prompt
+        assert "最短够用档" not in prompt
+    assert "收进较少、较长的 unit" in without_default
+    assert "能并进一档更长 unit 的相邻短拍不要拆成多个短 unit" in with_default
 
 
 def test_build_reference_units_split_prompt_speech_rate_override():

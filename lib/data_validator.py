@@ -962,8 +962,9 @@ class DataValidator:
     def _validate_utterances(utterances: Any, prefix: str, errors: list[ValidationMessage]) -> None:
         """校验 drama 场景级 utterances 的结构与 kind ⇄ speaker 约束（缺失放行，存量走读时迁移）。
 
-        每条须为 ``{kind, speaker, text}``：kind ∈ {dialogue, voiceover}、text 非空字符串；
-        dialogue 必带非空 speaker、voiceover 不得带 speaker。逐项 append、不 raise。
+        每条须为 ``{kind, speaker, text}``：kind ∈ {dialogue, inner_monologue, voiceover}、
+        text 非空字符串；dialogue / inner_monologue 必带非空 speaker、voiceover 不得带 speaker。
+        逐项 append、不 raise。
         """
         if utterances is None:
             return
@@ -976,7 +977,7 @@ class DataValidator:
                 errors.append(_m("val_utterance_must_be_object", prefix=uprefix))
                 continue
             kind = item.get("kind")
-            if kind not in ("dialogue", "voiceover"):
+            if kind not in ("dialogue", "inner_monologue", "voiceover"):
                 errors.append(_m("val_utterance_kind_invalid", prefix=uprefix))
             text = item.get("text")
             if not isinstance(text, str) or not text.strip():
@@ -992,7 +993,7 @@ class DataValidator:
             else:
                 # 字符串（空串 / 纯空白按 Utterance._normalize_speaker 同口径归一为「无 speaker」）或 None
                 has_speaker = isinstance(speaker, str) and bool(speaker.strip())
-            if kind == "dialogue" and not has_speaker:
+            if kind in ("dialogue", "inner_monologue") and not has_speaker:
                 errors.append(_m("val_utterance_dialogue_speaker", prefix=uprefix))
             elif kind == "voiceover" and has_speaker:
                 errors.append(_m("val_utterance_voiceover_speaker", prefix=uprefix))

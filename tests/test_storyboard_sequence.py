@@ -5,6 +5,7 @@ import pytest
 from lib.storyboard_sequence import (
     build_storyboard_dependency_plan,
     get_storyboard_items,
+    item_uses_previous_storyboard,
     resolve_previous_storyboard_path,
 )
 
@@ -73,10 +74,10 @@ class TestStoryboardSequence:
     def test_build_storyboard_dependency_plan_groups_contiguous_ranges(self):
         items = [
             {"segment_id": "E1S01", "segment_break": False},
-            {"segment_id": "E1S02", "segment_break": False},
+            {"segment_id": "E1S02", "segment_break": False, "use_previous_storyboard": True},
             {"segment_id": "E1S03", "segment_break": True},
-            {"segment_id": "E1S04", "segment_break": False},
-            {"segment_id": "E1S05", "segment_break": False},
+            {"segment_id": "E1S04", "segment_break": False, "use_previous_storyboard": True},
+            {"segment_id": "E1S05", "segment_break": False, "use_previous_storyboard": True},
         ]
 
         plans = build_storyboard_dependency_plan(
@@ -100,8 +101,8 @@ class TestStoryboardSequence:
         items = [
             {"scene_id": "E1S01", "segment_break": False},
             {"scene_id": "E1S02", "segment_break": False},
-            {"scene_id": "E1S03", "segment_break": False},
-            {"scene_id": "E1S04", "segment_break": False},
+            {"scene_id": "E1S03", "segment_break": False, "use_previous_storyboard": True},
+            {"scene_id": "E1S04", "segment_break": False, "use_previous_storyboard": True},
         ]
 
         plans = build_storyboard_dependency_plan(
@@ -113,9 +114,35 @@ class TestStoryboardSequence:
 
         assert [(plan.resource_id, plan.dependency_resource_id) for plan in plans] == [
             ("E1S01", None),
-            ("E1S03", None),
+            ("E1S03", "E1S02"),
             ("E1S04", "E1S03"),
         ]
+        # gap 切开 group，但 E1S03 仍声明对未选中上一镜 E1S02 的依赖（入队时再解析 active task）
+        assert plans[0].dependency_group != plans[1].dependency_group
+        assert plans[1].dependency_group == plans[2].dependency_group
+        assert plans[2].dependency_index == 1
+
+    def test_build_storyboard_dependency_plan_skips_chain_when_previous_disabled(self):
+        items = [
+            {"segment_id": "E1S01", "segment_break": False},
+            {"segment_id": "E1S02", "segment_break": False, "use_previous_storyboard": False},
+            {"segment_id": "E1S03", "segment_break": False, "use_previous_storyboard": True},
+        ]
+
+        plans = build_storyboard_dependency_plan(
+            items,
+            "segment_id",
+            ["E1S01", "E1S02", "E1S03"],
+            "episode_1.json",
+        )
+
+        assert [(plan.resource_id, plan.dependency_resource_id, plan.dependency_index) for plan in plans] == [
+            ("E1S01", None, 0),
+            ("E1S02", None, 0),
+            ("E1S03", "E1S02", 1),
+        ]
+        assert plans[0].dependency_group != plans[1].dependency_group
+        assert plans[1].dependency_group == plans[2].dependency_group
 
 
 class TestAdStoryboardItems:
@@ -182,3 +209,27 @@ class TestMismatchedScriptStaysEditable:
         assert kind == "video_units"
         assert id_field == "unit_id"
         assert [item["unit_id"] for item in items] == ["E1U01"]
+
+
+class TestItemUsesPreviousStoryboard:
+    def test_defaults_to_false_when_missing(self):
+        assert item_uses_previous_storyboard({}) is False
+        assert item_uses_previous_storyboard({"use_previous_storyboard": False}) is False
+
+    def test_explicit_true_enables(self):
+        assert item_uses_previous_storyboard({"use_previous_storyboard": True}) is True
+
+
+class TestCharacterNamesOnItem:
+    def test_empty_when_no_field(self):
+        from lib.storyboard_sequence import character_names_on_item
+
+        assert character_names_on_item({"characters_in_segment": ["Alice"]}, None) == frozenset()
+
+    def test_normalizes_and_strips(self):
+        from lib.storyboard_sequence import character_names_on_item
+
+        assert character_names_on_item(
+            {"characters_in_segment": [" Alice ", "Bob"]},
+            "characters_in_segment",
+        ) == frozenset({"Alice", "Bob"})

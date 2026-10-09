@@ -75,12 +75,36 @@ def _asset_candidates(
     asset_type: str,
     resolver: ArtifactCurrencyResolver,
 ) -> list[GenerationCandidate]:
-    """Missing-only candidates for one asset type."""
+    """Missing-only candidates for one asset type（角色含非 base look）。"""
+
+    from lib.character_looks import (
+        BASE_LOOK_ID,
+        ensure_character_looks,
+        list_look_ids,
+        look_asset_id,
+        resolve_look_sheet_path,
+    )
 
     spec = ASSET_SPECS[asset_type]
     candidates: list[GenerationCandidate] = []
     for name, entry in (project.get(spec.bucket_key) or {}).items():
-        sheet = entry.get(spec.sheet_field) if isinstance(entry, dict) else None
+        if not isinstance(entry, dict):
+            continue
+        if asset_type == "character":
+            ensure_character_looks(entry)
+            for look_id in list_look_ids(entry):
+                look = None if look_id == BASE_LOOK_ID else look_id
+                asset_id = look_asset_id(name, look)
+                sheet = resolve_look_sheet_path(entry, look)
+                candidates.append(
+                    GenerationCandidate(
+                        unit_id=asset_unit_id(asset_type, asset_id),
+                        artifact_key=ArtifactKey.asset_sheet(asset_type, asset_name_comparison_key(asset_id)),
+                        artifact_path=sheet if sheet else None,
+                    )
+                )
+            continue
+        sheet = entry.get(spec.sheet_field)
         candidates.append(
             GenerationCandidate(
                 unit_id=asset_unit_id(asset_type, name),
@@ -89,6 +113,24 @@ def _asset_candidates(
             )
         )
     return candidates
+
+
+def _description_of(project: dict[str, Any], asset_type: str, unit_id: str) -> str | None:
+    from lib.character_looks import LOOK_FILE_SEP, get_look_entry, parse_look_asset_id
+
+    spec = ASSET_SPECS[asset_type]
+    bare = asset_name_of(unit_id)
+    if asset_type == "character" and LOOK_FILE_SEP in bare:
+        char_name, look = parse_look_asset_id(bare)
+        entry = (project.get(spec.bucket_key) or {}).get(char_name)
+        if not isinstance(entry, dict):
+            return None
+        look_entry = get_look_entry(entry, look)
+        description = look_entry.get("description") if isinstance(look_entry, dict) else None
+        return description if isinstance(description, str) and description.strip() else None
+    entry = (project.get(spec.bucket_key) or {}).get(bare)
+    description = entry.get("description") if isinstance(entry, dict) else None
+    return description if isinstance(description, str) and description.strip() else None
 
 
 def _requested_unit_ids(
@@ -104,20 +146,22 @@ def _requested_unit_ids(
 
     if names is None:
         return None
+    from lib.character_looks import LOOK_FILE_SEP, look_asset_id, look_is_registered, parse_look_asset_id
+
     assets_dict = (project.get(ASSET_SPECS[asset_type].bucket_key) or {}) if project else {}
     resolved: list[str] = []
     for name in names:
+        if asset_type == "character" and LOOK_FILE_SEP in name:
+            char_name, look = parse_look_asset_id(name)
+            key = resolve_asset_key(assets_dict, char_name)
+            if key is not None and isinstance(assets_dict.get(key), dict) and look_is_registered(assets_dict[key], look):
+                resolved.append(asset_unit_id(asset_type, look_asset_id(key, look)))
+            else:
+                resolved.append(asset_unit_id(asset_type, name))
+            continue
         key = resolve_asset_key(assets_dict, name)
         resolved.append(asset_unit_id(asset_type, key if key is not None else name))
     return list(dict.fromkeys(resolved))
-
-
-def _description_of(project: dict[str, Any], asset_type: str, unit_id: str) -> str | None:
-    spec = ASSET_SPECS[asset_type]
-    name = asset_name_of(unit_id)
-    entry = (project.get(spec.bucket_key) or {}).get(name)
-    description = entry.get("description") if isinstance(entry, dict) else None
-    return description if isinstance(description, str) and description.strip() else None
 
 
 def list_pending_assets_tool(ctx: ToolContext):

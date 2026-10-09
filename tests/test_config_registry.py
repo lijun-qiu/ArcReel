@@ -30,6 +30,18 @@ def test_all_providers_registered():
 
 
 @pytest.mark.unit
+def test_openrouter_default_is_deepseek_v4_flash_0731():
+    """OpenRouter 默认文本模型须钉死为 DeepSeek V4 Flash 0731（非旧版 deepseek-v4-flash）。"""
+    meta = PROVIDER_REGISTRY["openrouter"]
+    assert "deepseek/deepseek-v4-flash" not in meta.models
+    model = meta.models["deepseek/deepseek-v4-flash-0731"]
+    assert model.default is True
+    assert model.display_name.startswith("DeepSeek V4 Flash 0731")
+    defaults = [mid for mid, m in meta.models.items() if m.default]
+    assert defaults == ["deepseek/deepseek-v4-flash-0731"]
+
+
+@pytest.mark.unit
 def test_provider_meta_fields():
     meta = PROVIDER_REGISTRY["gemini-aistudio"]
     assert isinstance(meta, ProviderMeta)

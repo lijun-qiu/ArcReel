@@ -253,7 +253,8 @@ class TestProjectEventService:
 
     @pytest.mark.unit
     @pytest.mark.asyncio
-    async def test_poll_detects_direct_script_write_and_syncs_episode_index(self, tmp_path):
+    async def test_poll_detects_direct_script_write_without_creating_missing_episode(self, tmp_path):
+        """直接落盘剧本不再自动建账：账本无此集时跳过同步，避免无 source_range 条目回流。"""
         pm = ProjectManager(tmp_path / "projects")
         pm.create_project("demo")
         pm.create_project_metadata("demo", "Demo", "Anime", "narration")
@@ -281,16 +282,30 @@ class TestProjectEventService:
                 encoding="utf-8",
             )
 
-            event_name, payload = await _next_event(stream, timeout=1.5)
-            assert event_name == "changes"
-            assert payload["source"] == "filesystem"
-            assert any(
-                change["entity_type"] == "episode" and change["action"] == "created" and change["episode"] == 2
-                for change in payload["changes"]
-            )
-            assert any(episode["episode"] == 2 for episode in pm.load_project("demo")["episodes"])
+            # 给监视一轮机会；不应因「新建 episode」发出 changes，账本也保持无第 2 集
+            with pytest.raises(asyncio.TimeoutError):
+                await _next_event(stream, timeout=0.4)
+            assert all(episode.get("episode") != 2 for episode in pm.load_project("demo")["episodes"])
 
         await service.shutdown()
+
+    @pytest.mark.unit
+    def test_script_index_sync_skips_create_when_episode_missing_from_ledger(self, tmp_path):
+        pm = ProjectManager(tmp_path / "projects")
+        project_dir = pm.create_project("demo")
+        pm.create_project_metadata("demo", "Demo", "Anime", "narration")
+        (project_dir / "scripts").mkdir(exist_ok=True)
+        (project_dir / "scripts" / "episode_1.json").write_text(
+            json.dumps(
+                {"episode": 1, "title": "残留", "content_mode": "narration", "segments": []},
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+
+        ProjectEventService(tmp_path)._ensure_script_index_synced("demo")
+
+        assert pm.load_project("demo")["episodes"] == []
 
     @pytest.mark.unit
     def test_script_index_sync_reconciles_only_the_authoritative_duplicate(self, tmp_path):

@@ -13,11 +13,12 @@ pytestmark = pytest.mark.unit
 
 
 def test_templates_count_and_categories():
-    assert len(STYLE_TEMPLATES) == 36
+    assert len(STYLE_TEMPLATES) == 39
     lives = [t for t in STYLE_TEMPLATES.values() if t["category"] == "live"]
     anims = [t for t in STYLE_TEMPLATES.values() if t["category"] == "anim"]
     assert len(lives) == 18
-    assert len(anims) == 18
+    assert len(anims) == 21
+    assert "anim_cn_idol_manhua" in STYLE_TEMPLATES
 
 
 def test_template_ids_unique_and_slug_shaped():
@@ -61,5 +62,5 @@ def test_list_templates_by_category():
     grouped = list_templates_by_category()
     assert set(grouped.keys()) == {"live", "anim"}
     assert len(grouped["live"]) == 18
-    assert len(grouped["anim"]) == 18
+    assert len(grouped["anim"]) == 21
     assert grouped["live"][0]["id"].startswith("live_")

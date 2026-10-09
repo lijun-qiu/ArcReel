@@ -16,6 +16,7 @@ import { WorkspaceNotificationsDrawer } from "./WorkspaceNotificationsDrawer";
 import { ExportScopeDialog } from "./ExportScopeDialog";
 import { ProjectMenu } from "./ProjectMenu";
 import { PhaseStepper } from "./PhaseStepper";
+import { EpisodePlanningControls } from "./EpisodePlanningControls";
 
 import { API } from "@/api";
 import { ArchiveDiagnosticsDialog } from "@/components/shared/ArchiveDiagnosticsDialog";
@@ -240,6 +241,8 @@ export function GlobalHeader({ onNavigateBack }: GlobalHeaderProps) {
 
         {/* ---- Right: actions ---- */}
         <div className="flex items-center gap-1">
+          <EpisodePlanningControls />
+
           <div className="relative" ref={notificationAnchorRef}>
             <button
               type="button"

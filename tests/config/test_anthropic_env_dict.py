@@ -144,7 +144,7 @@ async def test_multi_key_routes_to_embedded_rotator(monkeypatch: pytest.MonkeyPa
             api_key="sk-a",
             api_keys='[{"key":"sk-a"},{"key":"sk-b"}]',
             base_url="https://apihub.agnes-ai.com",
-            model="agnes-2.5-flash",
+            model="agnes-3.0-flash",
             haiku_model=None,
             sonnet_model=None,
             opus_model=None,
@@ -173,3 +173,47 @@ async def test_multi_key_routes_to_embedded_rotator(monkeypatch: pytest.MonkeyPa
     result = await build_anthropic_env_dict(session)
     assert result["ANTHROPIC_API_KEY"] == "proxy-token"
     assert result["ANTHROPIC_BASE_URL"] == "http://127.0.0.1:9"
+
+
+@pytest.mark.asyncio
+async def test_modelscope_single_proxy_key_direct_connects(monkeypatch: pytest.MonkeyPatch) -> None:
+    """魔搭单 Key（本机注入代理客户端钥）直连上游，不强制进内嵌轮换器。"""
+    session = AsyncMock()
+    repo_mock = AsyncMock()
+    cred = type(
+        "Cred",
+        (),
+        dict(
+            preset_id="modelscope",
+            api_key="modelscope_proxy_api_key",
+            api_keys=None,
+            base_url="http://127.0.0.1:10001",
+            model="deepseek-ai/DeepSeek-V4-Flash-0731",
+            haiku_model=None,
+            sonnet_model=None,
+            opus_model=None,
+            subagent_model=None,
+        ),
+    )()
+    repo_mock.get_active = AsyncMock(return_value=cred)
+
+    setting_repo = AsyncMock()
+    setting_repo.get_all = AsyncMock(return_value={})
+
+    class _FakeRotator:
+        proxy_token = "proxy-token"
+        base_url = "http://127.0.0.1:9"
+
+    monkeypatch.setattr(
+        "lib.db.repositories.agent_credential_repo.AgentCredentialRepository",
+        lambda _s: repo_mock,
+    )
+    monkeypatch.setattr("lib.config.service.SystemSettingRepository", lambda _s: setting_repo)
+    monkeypatch.setattr(
+        "server.agent_runtime.anthropic_key_rotator.get_rotator",
+        lambda: _FakeRotator(),
+    )
+
+    result = await build_anthropic_env_dict(session)
+    assert result["ANTHROPIC_API_KEY"] == "modelscope_proxy_api_key"
+    assert result["ANTHROPIC_BASE_URL"] == "http://127.0.0.1:10001"

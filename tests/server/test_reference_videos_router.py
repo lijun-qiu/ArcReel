@@ -1389,6 +1389,28 @@ def test_generate_batch_creates_the_whole_task_set_in_one_admission(
 
 
 @pytest.mark.integration
+def test_generate_batch_propagates_agnes_key_pool_flag_into_task_payload(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """参考视频手动批量与时间线批量同源：use_agnes_key_pool 进每条任务 payload，供 worker 按 key 数并发。"""
+
+    _seed_unit(client)
+    _seed_second_unit(client)
+    enqueued = _patch_batch_admission(monkeypatch, durations=[3, 6, 9])
+
+    resp = client.post(
+        BATCH_ENDPOINT,
+        json={"narration_delivery": "post_production", "use_agnes_key_pool": True},
+    )
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["decision"] == "admitted"
+    assert len(enqueued) == 2
+    for call in enqueued:
+        assert call["payload"]["use_agnes_key_pool"] is True
+
+
+@pytest.mark.integration
 def test_generate_batch_keeps_created_tasks_when_the_enqueue_is_interrupted(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:

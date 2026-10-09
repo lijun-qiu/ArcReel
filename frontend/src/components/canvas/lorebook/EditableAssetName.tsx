@@ -57,8 +57,9 @@ export function EditableAssetName({
 
   const heading = (
     <h3
-      className="display-serif min-w-0 flex-1 truncate text-[16px] font-semibold tracking-tight"
+      className="display-serif min-w-0 flex-1 break-words text-[13px] font-semibold leading-snug tracking-tight"
       style={{ color: "var(--color-text)" }}
+      title={name}
     >
       {name}
     </h3>
@@ -139,7 +140,7 @@ export function EditableAssetName({
 
   if (!isEditing) {
     return (
-      <div className="group flex min-w-0 flex-1 items-center gap-1">
+      <div className="group flex min-w-0 flex-1 items-start gap-1">
         {heading}
         <button
           type="button"
@@ -147,7 +148,7 @@ export function EditableAssetName({
           disabled={busy || renaming}
           title={t("assets:rename_asset")}
           aria-label={t("assets:rename_asset")}
-          className={`${ICON_BTN_CLS} text-[var(--color-text-3)] opacity-0 hover:text-[var(--color-text)] focus-visible:opacity-100 group-hover:opacity-100`}
+          className={`${ICON_BTN_CLS} mt-0.5 text-[var(--color-text-3)] opacity-0 hover:text-[var(--color-text)] focus-visible:opacity-100 group-hover:opacity-100`}
         >
           <Pencil className="h-3.5 w-3.5" />
         </button>
@@ -191,7 +192,7 @@ export function EditableAssetName({
         }}
         disabled={submitting}
         aria-label={t("assets:rename_asset")}
-        className="display-serif focus-ring min-w-0 flex-1 rounded border-b bg-transparent text-[16px] font-semibold tracking-tight outline-none"
+        className="display-serif focus-ring min-w-0 flex-1 rounded border-b bg-transparent text-[13px] font-semibold tracking-tight outline-none"
         style={{ color: "var(--color-text)", borderColor: "var(--color-accent-soft)" }}
       />
       <button

@@ -18,6 +18,7 @@ import { WizardStep3Style, type WizardStep3Value } from "./create-project/Wizard
 import type { ModelConfigValue } from "@/components/shared/ModelConfigSection";
 import { catalogDurations } from "@/hooks/useModelCapabilities";
 import { executingImageModel, executingVideoModel } from "@/components/shared/LayeredModelFields";
+import { lookupResolutions, preferredVideoResolution } from "@/utils/provider-models";
 
 // 新建项目对话框 · "Open Reel"
 // 仪式感来自项目大厅的 Darkroom 美学：editorial 衬线 + mono 标尺线 + sprocket 胶片孔。
@@ -218,6 +219,20 @@ export function CreateProjectModal() {
             textComplex: sysConfig.settings.text_backend_complex ?? "",
           },
         });
+        // 向导初始分辨率：有 480p 优先，否则 720p（与换模型时的偏好一致）。
+        const globals = {
+          video: sysConfig.settings.default_video_backend ?? "",
+          videoI2V: sysConfig.settings.default_video_backend_i2v ?? "",
+          videoR2V: sysConfig.settings.default_video_backend_r2v ?? "",
+        };
+        setModels((prev) => {
+          if (prev.videoResolution) return prev;
+          const executing = executingVideoModel(prev, globals, false);
+          const preferred = preferredVideoResolution(
+            lookupResolutions(providersRes.providers, executing, customRes.providers).options,
+          );
+          return preferred ? { ...prev, videoResolution: preferred } : prev;
+        });
       } catch (err) {
         if (!cancelled) setStep2Error(errMsg(err));
       }
@@ -267,13 +282,18 @@ export function CreateProjectModal() {
     const before = executingVideoModel(models, globals, basics.generationRoute === "reference_video");
     const after = executingVideoModel(models, globals, usesReferenceImages);
     const modelChanged = before !== after;
+    const nextResolution = modelChanged
+      ? preferredVideoResolution(
+          lookupResolutions(step2Data?.providers ?? [], after, step2Data?.customProviders ?? []).options,
+        )
+      : models.videoResolution;
     const nextDurations = catalogDurations(step2Data?.providers ?? [], step2Data?.customProviders ?? [], after, {
-      videoResolution: modelChanged ? null : models.videoResolution,
+      videoResolution: nextResolution,
       usesReferenceImages,
     });
     setModels((prev) => ({
       ...prev,
-      videoResolution: modelChanged ? null : prev.videoResolution,
+      videoResolution: nextResolution,
       defaultDuration:
         prev.defaultDuration !== null && nextDurations?.includes(prev.defaultDuration)
           ? prev.defaultDuration

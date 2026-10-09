@@ -8,9 +8,12 @@
 - **第一段**：``<X>@图片N`` 简式绑定（图片编号 = 随请求发出的参考图顺序）+ 声音声明集中
   声明区（``<X>的台词音色参考 @音频N，声音特征：…``）。听得到声音的 A/B 类均注入声音特征，
   两条无声路径（模型不产音的 C 类、本集关闭音频）都不注入
-- **第二段**：单元正文 + 发声记号（``<X>说 {台词}`` / ``画外音说 {台词}``）
+- **第二段**：单元正文 + 发声记号（``<X>说 {台词}`` /
+  ``<X>内心独白 {台词}（仅此心声瞬间…）`` / ``画外音说 {台词}``）；心声就地附加短闭嘴句；
+  同段若有心声，开口对白再贴「正常说话口型」，防止全程闭嘴
 - **第三段**：风格锚定 + 画质/稳定/字幕/水印约束包（本路径的反向约束全部由它承担，不另加
-  尾词）；两个及以上角色参考图时补双胞胎兜底
+  尾词）；两个及以上角色参考图时补双胞胎兜底；画外说话或内心独白 + 出镜脸时补口型约束包
+  （mute 仅含出镜且无 dialogue 的角色；无声路径已全员闭嘴则不再叠）
 
 所有内容模式的输入均是 unit 正文这一段自由文本，正文只写第二段；主体绑定与参考图顺序都经
 ``@[X]`` mention 解析派生（:func:`render_unit_prompt`）。文本不含绝对秒数，时长走请求字段。
@@ -29,12 +32,13 @@ from lib.prompt_builders import append_product_fidelity_tail
 from lib.prompt_utils import normalize_style
 from lib.reference_video.script_preview import (
     WARN_UNREGISTERED_MENTION,
+    derive_offscreen_speech_lip_guard,
     derive_utterances,
     derive_voice_bindings,
 )
 from lib.reference_video.text_parser import (
     derive_references_from_text,
-    extract_mentions,
+    extract_mention_refs,
     render_mentions_as_subjects,
     resolve_references,
     split_speech_line,
@@ -53,9 +57,19 @@ _WATERMARK_PACK = "不要生成水印；不要生成 Logo。"
 _NO_BGM_PACK = "禁止出现背景音乐。"
 # 无声路径（模型不产音 / 本集关音频）：除禁 BGM 外，显式压对白与说话口型，
 # 避免供应商自带原生音频时「凭空加台词」。
-_SILENT_NO_SPEECH_PACK = (
-    "成片必须完全无声：不要对白、旁白、说话声或任何口播；人物闭嘴，不做说话口型。"
+_SILENT_NO_SPEECH_PACK = "成片必须完全无声：不要对白、旁白、说话声或任何口播；人物闭嘴，不做说话口型。"
+# 画外开口 / 内心独白 + 出镜脸：压心声口型，但对白必须放开；mute 行只给「全文未开口」的出镜人。
+# 心声与开口同段时：第二段心声贴短闭嘴句、对白贴「正常说话口型」，避免模型把闭嘴扩成全程。
+_OFFSCREEN_SPEECH_LIP_PACK = (
+    "画外台词只由标注的说话人发声。"
+    "仅「内心独白」标注的瞬间：该角色嘴唇紧闭、不做说话口型；"
+    "凡标注「说」的开口对白：对应角色必须正常说话口型，禁止因心声约束而全程闭嘴。"
+    "出镜且全文未开口的人物嘴唇紧闭，不要把画外台词或心声的口型加到他们脸上。"
 )
+#: 贴在每条内心独白官方句式后——只约束该心声瞬间，勿扩成全片闭嘴。
+_INNER_MONOLOGUE_CLOSED_MOUTH = "（仅此心声瞬间：嘴唇紧闭，不做说话口型）"
+#: 同段有心声时贴在每条开口对白后，对抗心声闭嘴句被模型扩成全程无嘴型。
+_DIALOGUE_OPEN_MOUTH = "（此时正常说话口型）"
 _TWIN_PACK = (
     "视频全程禁止出现外形、着装、配饰完全一致的人物，禁止生成同款分身、"
     "双胞胎效果，同一画面中仅保留单个对应人物，不出现人物重复复刻。"
@@ -126,13 +140,16 @@ def render_unit_prompt(
 
     warning 与解析预览面板同一批 ``{key, params}`` 条目，由调用方并入任务 ``result.warnings``。
     """
-    mentions = extract_mentions(text)
+    mentions = extract_mention_refs(text)
     utterances, warnings = derive_utterances(text)
 
     # ``references`` 是入参（上游持久化的派生结果），其名字以哪种编码形式落盘不可控；正文一侧
     # 出自解析器、已归一。两侧同形，主体记号与图号才对得上——不归一时该角色的绑定行会缺位、
     # 音频也挂不到图上，且全程不报错。
-    references = [ReferenceResource(type=ref.type, name=asset_name_comparison_key(ref.name)) for ref in references]
+    references = [
+        ReferenceResource(type=ref.type, name=asset_name_comparison_key(ref.name), look=ref.look)
+        for ref in references
+    ]
 
     registered, missing = resolve_references(mentions, project)
     warnings = [_warning_unregistered(name) for name in missing] + warnings
@@ -140,8 +157,11 @@ def render_unit_prompt(
     # 只是这次没随请求发图（纯画外角色同理——有主体、无图）。未登记的 mention 才留原文。
     subjects = {ref.name for ref in registered}
 
-    # 音频只能挂到 character 参考图；按类型过滤后建 name → 序号映射。
-    character_image_no = {ref.name: i for i, ref in enumerate(references, start=1) if ref.type == "character"}
+    # 音频只能挂到 character 参考图；按类型过滤后建 name → 序号映射（同角色多造型取首个）。
+    character_image_no: dict[str, int] = {}
+    for i, ref in enumerate(references, start=1):
+        if ref.type == "character" and ref.name not in character_image_no:
+            character_image_no[ref.name] = i
 
     characters = _character_bucket(project)
     bindings = derive_voice_bindings(
@@ -152,15 +172,25 @@ def render_unit_prompt(
     )
     warnings.extend(bindings.warnings)
 
+    lip_guard = derive_offscreen_speech_lip_guard(text, utterances, project)
+    warnings.extend(lip_guard.warnings)
+
     audio_no, audio_speaker_reference_index = _number_audio_speakers(bindings.audio_speakers, character_image_no)
 
     segments = [
         _render_segment_one([ref.name for ref in references], bindings.speakers, audio_no, characters, settings),
-        _render_segment_two(text, subjects, characters),
+        _render_segment_two(
+            text,
+            subjects,
+            characters,
+            emphasize_dialogue_lips=any(u.kind == "inner_monologue" for u in utterances),
+        ),
         _render_segment_three(
             sum(1 for ref in references if ref.type == "character"),
             style,
             silent=settings.is_silent,
+            offscreen_speech_lip_guard=lip_guard.apply and not settings.is_silent,
+            mute_names=lip_guard.mute_names if (lip_guard.apply and not settings.is_silent) else (),
         ),
     ]
     prompt = "\n\n".join(seg for seg in segments if seg)
@@ -277,12 +307,21 @@ def _render_segment_one(
     return "\n".join(lines)
 
 
-def _render_segment_two(text: str, subjects: Collection[str], characters: dict) -> str:
+def _render_segment_two(
+    text: str,
+    subjects: Collection[str],
+    characters: dict,
+    *,
+    emphasize_dialogue_lips: bool = False,
+) -> str:
     """单元正文段：画面描述做 mention 替换，发声记号就地重组为官方句式。
 
     ``subjects`` 是已登记的 mention 名（未经能力上限裁剪）——主体记号 ``<X>`` 表达「画面里的
     这个人 / 物」，不指向图号，故与参考图编号解耦：裁掉图的名字照样是主体，只有未登记的
     mention 才留编辑器原文（配 ``ref_warn_unregistered_mention``）。
+
+    ``emphasize_dialogue_lips``：同段有内心独白时，给每条开口对白附加「正常说话口型」，
+    避免心声瞬间的闭嘴句被模型扩成全程无嘴型。
 
     正文逐行原样渲染，不再重排或加分段前缀：正文是作者写下的唯一真相，行文顺序即传达顺序。
     记号可写在行内任意位置，重组按位置就地替换、描述部分留在原处。说话人按**资产表**判定
@@ -296,12 +335,19 @@ def _render_segment_two(text: str, subjects: Collection[str], characters: dict) 
         for part in split_speech_line(line):
             if isinstance(part, str):
                 pieces.append(render_mentions_as_subjects(part, subjects))
-            elif not part.speaker:
+            elif part.kind == "voiceover" or not part.speaker:
                 pieces.append(f"画外音说 {{{part.text}}}")
-            elif part.speaker in characters:
-                pieces.append(f"<{part.speaker}>说 {{{part.text}}}")
-            else:
+            elif part.speaker not in characters:
                 pieces.append(render_mentions_as_subjects(part.raw, subjects))
+            elif part.kind == "inner_monologue":
+                # 闭嘴约束绑在心声记号上，不整段 mute 说话人——同段后续「说」仍可出口型。
+                pieces.append(
+                    f"<{part.speaker}>内心独白 {{{part.text}}}{_INNER_MONOLOGUE_CLOSED_MOUTH}"
+                )
+            elif emphasize_dialogue_lips:
+                pieces.append(f"<{part.speaker}>说 {{{part.text}}}{_DIALOGUE_OPEN_MOUTH}")
+            else:
+                pieces.append(f"<{part.speaker}>说 {{{part.text}}}")
         lines.append("".join(pieces))
     return "\n".join(line for line in lines if line.strip())
 
@@ -311,8 +357,13 @@ def _render_segment_three(
     style: str | None,
     *,
     silent: bool = False,
+    offscreen_speech_lip_guard: bool = False,
+    mute_names: Collection[str] = (),
 ) -> str:
-    """风格锚定 + 画质/稳定/字幕/水印约束包；两个及以上角色参考图时补双胞胎兜底。"""
+    """风格锚定 + 画质/稳定/字幕/水印约束包；两个及以上角色参考图时补双胞胎兜底。
+
+    ``offscreen_speech_lip_guard`` 与无声路径互斥：无声已要求全员闭嘴，不再叠画外口型包。
+    """
     lines: list[str] = []
     normalized = normalize_style(style)
     if normalized:
@@ -321,6 +372,10 @@ def _render_segment_three(
     lines.append(_SUBTITLE_PACK + _WATERMARK_PACK + _NO_BGM_PACK)
     if silent:
         lines.append(_SILENT_NO_SPEECH_PACK)
+    elif offscreen_speech_lip_guard:
+        for name in mute_names:
+            lines.append(f"<{name}>嘴唇紧闭，不做说话口型。")
+        lines.append(_OFFSCREEN_SPEECH_LIP_PACK)
     if character_reference_count >= 2:
         lines.append(_TWIN_PACK)
     return "\n".join(lines)

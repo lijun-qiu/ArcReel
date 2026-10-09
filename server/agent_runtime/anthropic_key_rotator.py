@@ -259,13 +259,15 @@ class AnthropicKeyRotator:
         await self._persist_state(active.cred_id, state)
 
         upstream_root = active.upstream_base_url
-        if not upstream_root or "host.docker.internal" in upstream_root or ":10002" in upstream_root:
-            logger.warning(
-                "active credential base_url looks like a local proxy (%s); "
-                "set upstream to https://apihub.agnes-ai.com or https://api.anthropic.com",
-                upstream_root,
-            )
         path = request.path_params.get("path") or ""
+        # 魔搭本机注入代理的 UPSTREAM 已带 /v1；Anthropic SDK 再拼 /v1/messages 会双写。
+        # 剥掉路径前缀 v1/，让代理收到 /messages → …/v1/messages。
+        if _is_modelscope_openai_style_proxy(upstream_root) and (
+            path == "v1" or path.startswith("v1/")
+        ):
+            path = path[3:] or ""
+            if path.startswith("/"):
+                path = path[1:]
         upstream_url = f"{upstream_root}/{path}" if path else upstream_root
         body = await request.body()
 
@@ -384,6 +386,14 @@ class AnthropicKeyRotator:
                 await cm.__aexit__(None, None, None)
 
         return StreamingResponse(byte_stream(), status_code=status, headers=out_headers, media_type=media)
+
+
+def _is_modelscope_openai_style_proxy(base_url: str | None) -> bool:
+    """本机魔搭 key 注入代理（OpenAI 兼容、UPSTREAM 已含 /v1）。"""
+    if not base_url:
+        return False
+    lowered = base_url.lower().rstrip("/")
+    return lowered.endswith(":10001") or "modelscope_proxy" in lowered
 
 
 def _looks_like_daily_quota(body: bytes) -> bool:

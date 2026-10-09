@@ -166,7 +166,7 @@ async def test_export_serializes_only_shared_track_gains_actual_boundaries_and_c
     assert video_track["segments"][0]["target_timerange"] == {"start": 0, "duration": 1_000_000}
     assert video_track["segments"][0]["volume"] == pytest.approx(0.0)
     assert audio_track["segments"][0]["target_timerange"] == {"start": 0, "duration": 900_000}
-    assert audio_track["segments"][0]["volume"] == pytest.approx(1.0)
+    assert audio_track["segments"][0]["volume"] == pytest.approx(0.4)
     assert [segment["target_timerange"] for segment in text_track["segments"]] == [
         {"start": 0, "duration": 300_000},
         {"start": 300_000, "duration": 600_000},

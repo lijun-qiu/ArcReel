@@ -1,17 +1,25 @@
 import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { ImagePlus, Pause, Play, Upload, User, X } from "lucide-react";
+import { Expand, ImagePlus, Pause, Play, Plus, Trash2, Upload, User, X } from "lucide-react";
+import { enqueueCharacter } from "@/actions/generation";
 import { API } from "@/api";
 import { AddToLibraryButton } from "@/components/assets/AddToLibraryButton";
 import { ImageEditButton } from "@/components/canvas/timeline/ImageEditButton";
 import { VersionTimeMachine } from "@/components/canvas/timeline/VersionTimeMachine";
 import { AspectFrame } from "@/components/ui/AspectFrame";
+import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { GenerateButton } from "@/components/ui/GenerateButton";
+import { GlassModal } from "@/components/ui/GlassModal";
 import { ImageFlipReveal } from "@/components/ui/ImageFlipReveal";
 import { PreviewableImageFrame } from "@/components/ui/PreviewableImageFrame";
 import { useAppStore } from "@/stores/app-store";
 import { useProjectsStore } from "@/stores/projects-store";
+import { useActiveResourceIds } from "@/stores/tasks-store";
 import { errMsg } from "@/utils/async";
+import {
+  previewCharacterLookPrompt,
+  previewCharacterPrompt,
+} from "@/utils/character-prompt-preview";
 import { rejectIfAssetBusy } from "./assetBusyGuard";
 import { EditableAssetName } from "./EditableAssetName";
 import { VoiceSampleButton } from "./VoiceSampleButton";
@@ -54,6 +62,262 @@ const FIELD_STYLE: React.CSSProperties = {
   boxShadow: "inset 0 1px 2px oklch(0 0 0 / 0.2)",
 };
 
+function WardrobeLookRow({
+  projectName,
+  characterName,
+  lookId,
+  description,
+  sheetPath,
+  fallbackDescription,
+  projectStyle,
+  projectStyleDescription,
+  busy,
+  readOnly,
+  onBusy,
+  onReload,
+}: {
+  projectName: string;
+  characterName: string;
+  lookId: string;
+  description: string;
+  sheetPath?: string;
+  fallbackDescription: string;
+  projectStyle: string;
+  projectStyleDescription: string;
+  busy: boolean;
+  readOnly: boolean;
+  onBusy: (busy: boolean) => void;
+  onReload?: () => Promise<unknown> | void;
+}) {
+  const { t } = useTranslation(["dashboard", "assets"]);
+  const lookAssetId = `${characterName}__${lookId}`;
+  const lookFp = useProjectsStore((s) =>
+    sheetPath ? s.getAssetFingerprint(sheetPath) : null,
+  );
+  const lookUrl = sheetPath ? API.getFileUrl(projectName, sheetPath, lookFp) : null;
+  const busyIds = useActiveResourceIds("character", projectName);
+  const lookBusy = busy || busyIds.has(lookAssetId);
+  const label = `${characterName}@${lookId}`;
+  const [open, setOpen] = useState(false);
+  const [draft, setDraft] = useState(description);
+  const [savingLook, setSavingLook] = useState(false);
+  const titleId = useId();
+
+  useEffect(() => {
+    if (open) setDraft(description);
+  }, [open, description]);
+
+  const lookDirty = draft !== description;
+  const fullPrompt = previewCharacterLookPrompt(characterName, lookId, draft, {
+    baseDescription: fallbackDescription,
+    style: projectStyle,
+    styleDescription: projectStyleDescription,
+  });
+
+  return (
+    <>
+      <li className="list-none">
+        <button
+          type="button"
+          onClick={() => setOpen(true)}
+          title={label}
+          aria-label={t("wardrobe_look_modal_title", {
+            ns: "assets",
+            name: characterName,
+            look: lookId,
+          })}
+          className="focus-ring group flex w-[4.5rem] flex-col items-stretch gap-1 rounded-lg p-0.5 text-left transition-colors hover:bg-[oklch(1_0_0_/_0.04)]"
+        >
+          <div
+            className="aspect-square w-full overflow-hidden rounded-md"
+            style={{
+              background: "var(--color-bg-2)",
+              border: lookBusy
+                ? "1px solid var(--color-accent-soft)"
+                : "1px solid var(--color-border)",
+            }}
+          >
+            {lookUrl ? (
+              <img src={lookUrl} alt="" className="h-full w-full object-cover" />
+            ) : (
+              <div className="flex h-full w-full items-center justify-center">
+                <User className="h-5 w-5" style={{ color: "var(--color-text-4)" }} />
+              </div>
+            )}
+          </div>
+          <span
+            className="truncate text-center text-[10px] leading-tight"
+            style={{ color: "var(--color-text-3)" }}
+          >
+            {lookId}
+          </span>
+        </button>
+      </li>
+
+      <GlassModal
+        open={open}
+        onClose={() => {
+          if (savingLook) return;
+          setOpen(false);
+        }}
+        labelledBy={titleId}
+        widthClassName="w-full max-w-lg"
+        panelClassName="flex max-h-[85vh] flex-col overflow-hidden"
+        closeOnEscape={!savingLook}
+        closeOnBackdrop={!savingLook}
+      >
+        <div className="flex shrink-0 items-start gap-2 px-5 pb-3 pt-5">
+          <h2
+            id={titleId}
+            className="min-w-0 flex-1 break-words text-[15px] font-semibold"
+            style={{ color: "var(--color-text)" }}
+          >
+            {t("wardrobe_look_modal_title", { ns: "assets", name: characterName, look: lookId })}
+          </h2>
+          {readOnly ? null : (
+            <div className="flex shrink-0 flex-wrap items-center justify-end gap-1.5">
+              <button
+                type="button"
+                disabled={savingLook || !lookDirty}
+                className="focus-ring rounded-md px-2.5 py-1.5 text-[11px] font-medium disabled:cursor-not-allowed disabled:opacity-50"
+                style={{
+                  color: "oklch(0.14 0 0)",
+                  background: "linear-gradient(135deg, var(--color-accent-2), var(--color-accent))",
+                }}
+                onClick={async () => {
+                  setSavingLook(true);
+                  try {
+                    await API.updateCharacterLook(projectName, characterName, lookId, draft);
+                    useAppStore.getState().pushToast(t("wardrobe_look_saved", { ns: "assets" }), "success");
+                    await onReload?.();
+                  } catch (err) {
+                    useAppStore.getState().pushToast(errMsg(err), "error");
+                  } finally {
+                    setSavingLook(false);
+                  }
+                }}
+              >
+                {savingLook ? t("common:saving") : t("wardrobe_save_look", { ns: "assets" })}
+              </button>
+              <button
+                type="button"
+                disabled={lookBusy || savingLook}
+                className="focus-ring rounded-md px-2.5 py-1.5 text-[11px] disabled:cursor-not-allowed disabled:opacity-50"
+                style={{
+                  background: "var(--color-accent-dim)",
+                  border: "1px solid var(--color-accent-soft)",
+                  color: "var(--color-accent-2)",
+                }}
+                onClick={async () => {
+                  if (rejectIfAssetBusy("character", projectName, lookAssetId, t)) return;
+                  onBusy(true);
+                  try {
+                    await enqueueCharacter(
+                      projectName,
+                      lookAssetId,
+                      draft.trim() || description || fallbackDescription,
+                    );
+                    await onReload?.();
+                  } catch (err) {
+                    useAppStore.getState().pushToast(errMsg(err), "error");
+                  } finally {
+                    onBusy(false);
+                  }
+                }}
+              >
+                {t("wardrobe_generate", { ns: "assets" })}
+              </button>
+              <VersionTimeMachine
+                projectName={projectName}
+                resourceType="characters"
+                resourceId={lookAssetId}
+                onRestore={onReload ? async () => { await onReload(); } : undefined}
+                iconOnly
+                busy={lookBusy || savingLook}
+              />
+              <button
+                type="button"
+                disabled={busy || savingLook}
+                title={t("wardrobe_delete", { ns: "assets" })}
+                aria-label={t("wardrobe_delete", { ns: "assets" })}
+                className="focus-ring inline-flex h-7 w-7 items-center justify-center rounded-md transition-colors hover:bg-[oklch(1_0_0_/_0.05)] hover:text-[var(--color-warm-bright)] disabled:cursor-not-allowed disabled:opacity-40"
+                style={{ color: "var(--color-text-3)" }}
+                onClick={async () => {
+                  onBusy(true);
+                  try {
+                    await API.deleteCharacterLook(projectName, characterName, lookId);
+                    setOpen(false);
+                    await onReload?.();
+                  } catch (err) {
+                    useAppStore.getState().pushToast(errMsg(err), "error");
+                  } finally {
+                    onBusy(false);
+                  }
+                }}
+              >
+                <Trash2 className="h-3.5 w-3.5" />
+              </button>
+            </div>
+          )}
+          <button
+            type="button"
+            onClick={() => setOpen(false)}
+            disabled={savingLook}
+            className="focus-ring inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md disabled:opacity-40"
+            style={{ color: "var(--color-text-3)" }}
+            aria-label={t("common:cancel")}
+          >
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+
+        <div className="min-h-0 flex-1 space-y-3 overflow-y-auto px-5 pb-5">
+          <PreviewableImageFrame src={lookUrl} alt={label} buttonClassName="right-2 top-2">
+            <div
+              className="overflow-hidden rounded-lg"
+              style={{ border: "1px solid var(--color-hairline-soft)", background: "var(--color-bg-2)" }}
+            >
+              {lookUrl ? (
+                <img src={lookUrl} alt={label} className="max-h-40 w-full object-contain sm:max-h-48" />
+              ) : (
+                <div className="flex h-28 items-center justify-center" style={{ color: "var(--color-text-4)" }}>
+                  <User className="h-10 w-10" />
+                </div>
+              )}
+            </div>
+          </PreviewableImageFrame>
+
+          <div>
+            <CapsLabel>{t("wardrobe_look_desc", { ns: "assets" })}</CapsLabel>
+            <textarea
+              value={draft}
+              readOnly={readOnly}
+              onChange={(e) => setDraft(e.target.value)}
+              rows={3}
+              className="focus-ring mt-1.5 w-full resize-y rounded-lg px-3 py-2 text-[13px] leading-[1.55] outline-none"
+              style={FIELD_STYLE}
+              placeholder={t("wardrobe_look_desc", { ns: "assets" })}
+            />
+          </div>
+
+          <div>
+            <CapsLabel>{t("full_prompt_label", { ns: "assets" })}</CapsLabel>
+            <pre
+              className="mt-1.5 whitespace-pre-wrap break-words rounded-lg px-3 py-2 text-[11px] leading-relaxed"
+              style={{ ...FIELD_STYLE, color: "var(--color-text-2)" }}
+            >
+              {fullPrompt}
+            </pre>
+            <p className="mt-1 text-[10px]" style={{ color: "var(--color-text-4)" }}>
+              {t("full_prompt_hint", { ns: "assets" })}
+            </p>
+          </div>
+        </div>
+      </GlassModal>
+    </>
+  );
+}
+
 export function CharacterCard({
   name,
   character,
@@ -77,6 +341,9 @@ export function CharacterCard({
   );
   const [description, setDescription] = useState(character.description);
   const [voiceStyle, setVoiceStyle] = useState(character.voice_style ?? "");
+  const [newLookId, setNewLookId] = useState("");
+  const [newLookDesc, setNewLookDesc] = useState("");
+  const [wardrobeBusy, setWardrobeBusy] = useState(false);
   const [imgError, setImgError] = useState(false);
   const [referenceFile, setReferenceFile] = useState<File | null>(null);
   const [referencePreview, setReferencePreview] = useState<string | null>(null);
@@ -86,9 +353,14 @@ export function CharacterCard({
   const [audioProgress, setAudioProgress] = useState(0);
   const [audioDuration, setAudioDuration] = useState<number | null>(null);
   const [deletingAudio, setDeletingAudio] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const [deleting, setDeleting] = useState(false);
   const [saving, setSaving] = useState(false);
   const [uploadingSheet, setUploadingSheet] = useState(false);
   const [isEditing, setIsEditing] = useState(false);
+  const [descModalOpen, setDescModalOpen] = useState(false);
+  const [descDraft, setDescDraft] = useState(character.description);
+  const [addLookOpen, setAddLookOpen] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const audioInputRef = useRef<HTMLInputElement>(null);
   const audioElRef = useRef<HTMLAudioElement>(null);
@@ -96,6 +368,13 @@ export function CharacterCard({
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const descId = useId();
   const voiceId = useId();
+  const descModalTitleId = useId();
+  const descModalFieldId = useId();
+  const addLookTitleId = useId();
+  const projectStyle = useProjectsStore((s) => s.currentProjectData?.style ?? "");
+  const projectStyleDescription = useProjectsStore(
+    (s) => s.currentProjectData?.style_description ?? "",
+  );
 
   const handleSheetUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -120,6 +399,10 @@ export function CharacterCard({
     setDescription(character.description);
     setVoiceStyle(character.voice_style ?? "");
   }, [character.description, character.voice_style]);
+
+  useEffect(() => {
+    if (descModalOpen) setDescDraft(description);
+  }, [descModalOpen, description]);
 
   useEffect(() => {
     // 角色立绘变化时重置图片加载错误标记
@@ -173,8 +456,8 @@ export function CharacterCard({
   }, []);
 
   useEffect(() => {
-    autoResize();
-  }, [autoResize, description]);
+    if (descModalOpen) autoResize();
+  }, [autoResize, descModalOpen, descDraft]);
 
   const isDirty =
     description !== character.description ||
@@ -243,6 +526,22 @@ export function CharacterCard({
       useAppStore.getState().pushToast(errMsg(err), "error");
     } finally {
       setDeletingAudio(false);
+    }
+  };
+
+  const handleDelete = async () => {
+    if (deleting) return;
+    if (rejectIfAssetBusy("character", projectName, name, t, "assets:delete_busy_hint")) return;
+    setDeleting(true);
+    try {
+      await API.deleteCharacter(projectName, name);
+      setConfirmDelete(false);
+      useAppStore.getState().pushToast(t("assets:delete_success", { name }), "success");
+      await onReload?.();
+    } catch (err) {
+      useAppStore.getState().pushToast(errMsg(err), "error");
+    } finally {
+      setDeleting(false);
     }
   };
 
@@ -327,7 +626,7 @@ export function CharacterCard({
       />
 
       {/* ---- Header: 单排 icon + name + icon-only 工具栏 ---- */}
-      <div className="mb-4 flex items-center gap-2.5">
+      <div className="mb-4 flex items-start gap-2.5">
         <span
           aria-hidden
           className="grid h-7 w-7 shrink-0 place-items-center rounded-md"
@@ -346,14 +645,14 @@ export function CharacterCard({
           readOnly={readOnly}
           /* 改名会搬动落盘文件：与本卡片自身在途的写请求交错会留下旧名孤儿文件，
              因此改名比兄弟控件多禁用一档，把卡片本地的在途标志也算进占用态。 */
-          busy={generating || uploadingSheet || saving || deletingAudio}
+          busy={generating || uploadingSheet || saving || deletingAudio || deleting}
         />
         {readOnly ? null : (
         <div className="flex shrink-0 items-center gap-0.5">
           <button
             type="button"
             onClick={() => sheetInputRef.current?.click()}
-            disabled={uploadingSheet || generating}
+            disabled={uploadingSheet || generating || deleting}
             title={t("assets:upload_sheet")}
             aria-label={t("assets:upload_sheet")}
             className="focus-ring inline-flex h-7 w-7 items-center justify-center rounded-md transition-colors hover:bg-[oklch(1_0_0_/_0.05)] disabled:cursor-not-allowed disabled:opacity-40"
@@ -374,7 +673,7 @@ export function CharacterCard({
             resourceType="character"
             resourceId={name}
             hasImage={Boolean(character.character_sheet)}
-            busy={generating || uploadingSheet}
+            busy={generating || uploadingSheet || deleting}
           />
           <AddToLibraryButton
             resourceType="character"
@@ -383,7 +682,7 @@ export function CharacterCard({
             initialDescription={character.description}
             initialVoiceStyle={character.voice_style ?? ""}
             sheetPath={character.character_sheet}
-            busy={generating || uploadingSheet}
+            busy={generating || uploadingSheet || deleting}
             className="focus-ring inline-flex h-7 w-7 items-center justify-center rounded-md text-[var(--color-text-3)] transition-colors hover:bg-[oklch(1_0_0_/_0.05)] disabled:cursor-not-allowed disabled:opacity-40"
           />
           <VersionTimeMachine
@@ -392,8 +691,19 @@ export function CharacterCard({
             resourceId={name}
             onRestore={onRestoreVersion}
             iconOnly
-            busy={generating || uploadingSheet}
+            busy={generating || uploadingSheet || deleting}
           />
+          <button
+            type="button"
+            onClick={() => setConfirmDelete(true)}
+            disabled={uploadingSheet || generating || deleting || deletingAudio}
+            title={t("assets:delete")}
+            aria-label={t("assets:delete")}
+            className="focus-ring inline-flex h-7 w-7 items-center justify-center rounded-md transition-colors hover:bg-[oklch(1_0_0_/_0.05)] hover:text-[var(--color-warm-bright)] disabled:cursor-not-allowed disabled:opacity-40"
+            style={{ color: "var(--color-text-3)" }}
+          >
+            <Trash2 className="h-3.5 w-3.5" />
+          </button>
         </div>
         )}
       </div>
@@ -520,19 +830,246 @@ export function CharacterCard({
         )}
       </div>
 
-      <CapsLabel htmlFor={descId}>{t("description")}</CapsLabel>
-      <textarea
-        ref={textareaRef}
+      <div className="mt-1.5 flex items-center justify-between gap-2">
+        <CapsLabel htmlFor={descId}>{t("description")}</CapsLabel>
+        <button
+          type="button"
+          onClick={() => setDescModalOpen(true)}
+          className="focus-ring inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[11px] transition-colors hover:bg-[oklch(1_0_0_/_0.05)]"
+          style={{ color: "var(--color-accent-2)" }}
+        >
+          <Expand className="h-3 w-3" />
+          {t("description_expand", { ns: "assets" })}
+        </button>
+      </div>
+      <button
+        type="button"
         id={descId}
-        value={description}
-        readOnly={readOnly}
-        onChange={(e) => setDescription(e.target.value)}
-        onInput={autoResize}
-        rows={3}
-        className="focus-ring mt-1.5 w-full resize-none overflow-hidden rounded-lg px-3 py-2 text-[13px] leading-[1.55] outline-none transition-[border-color,box-shadow]"
+        onClick={() => setDescModalOpen(true)}
+        className="focus-ring mt-1.5 w-full rounded-lg px-3 py-2 text-left text-[13px] leading-[1.55] outline-none transition-[border-color,box-shadow]"
         style={FIELD_STYLE}
-        placeholder={t("character_desc_placeholder")}
-      />
+      >
+        <span
+          className="line-clamp-3 whitespace-pre-wrap break-words"
+          style={{ color: description ? "var(--color-text)" : "var(--color-text-4)" }}
+        >
+          {description || t("character_desc_placeholder")}
+        </span>
+      </button>
+
+      <GlassModal
+        open={descModalOpen}
+        onClose={() => setDescModalOpen(false)}
+        labelledBy={descModalTitleId}
+        widthClassName="w-full max-w-lg"
+        panelClassName="flex max-h-[85vh] flex-col overflow-hidden"
+      >
+        <div className="flex shrink-0 items-start justify-between gap-3 px-5 pb-3 pt-5">
+          <h2
+            id={descModalTitleId}
+            className="text-[15px] font-semibold"
+            style={{ color: "var(--color-text)" }}
+          >
+            {t("description_modal_title", { ns: "assets" })}
+          </h2>
+          <button
+            type="button"
+            onClick={() => setDescModalOpen(false)}
+            className="focus-ring inline-flex h-7 w-7 items-center justify-center rounded-md"
+            style={{ color: "var(--color-text-3)" }}
+            aria-label={t("common:cancel")}
+          >
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+        <div className="min-h-0 flex-1 space-y-3 overflow-y-auto px-5 pb-3">
+          <div>
+            <CapsLabel htmlFor={descModalFieldId}>{t("description")}</CapsLabel>
+            <textarea
+              ref={textareaRef}
+              id={descModalFieldId}
+              value={descDraft}
+              readOnly={readOnly}
+              onChange={(e) => setDescDraft(e.target.value)}
+              onInput={autoResize}
+              rows={5}
+              className="focus-ring mt-1.5 w-full resize-y rounded-lg px-3 py-2 text-[13px] leading-[1.55] outline-none"
+              style={{ ...FIELD_STYLE, minHeight: "6rem" }}
+              placeholder={t("character_desc_placeholder")}
+            />
+          </div>
+          <div>
+            <CapsLabel>{t("full_prompt_label", { ns: "assets" })}</CapsLabel>
+            <pre
+              className="mt-1.5 whitespace-pre-wrap break-words rounded-lg px-3 py-2 text-[11px] leading-relaxed"
+              style={{ ...FIELD_STYLE, color: "var(--color-text-2)" }}
+            >
+              {previewCharacterPrompt(name, descDraft, projectStyle, projectStyleDescription)}
+            </pre>
+            <p className="mt-1 text-[10px]" style={{ color: "var(--color-text-4)" }}>
+              {t("full_prompt_hint", { ns: "assets" })}
+            </p>
+          </div>
+        </div>
+        {readOnly ? null : (
+          <div
+            className="flex shrink-0 border-t px-5 py-3"
+            style={{ borderColor: "var(--color-hairline-soft)" }}
+          >
+            <button
+              type="button"
+              className="focus-ring rounded-lg px-3 py-2 text-[12px] font-medium"
+              style={{
+                color: "oklch(0.14 0 0)",
+                background: "linear-gradient(135deg, var(--color-accent-2), var(--color-accent))",
+              }}
+              onClick={() => {
+                setDescription(descDraft);
+                setDescModalOpen(false);
+              }}
+            >
+              {t("description_modal_done", { ns: "assets" })}
+            </button>
+          </div>
+        )}
+      </GlassModal>
+
+      <div className="mt-3">
+        <CapsLabel>{t("wardrobe_title", { ns: "assets" })}</CapsLabel>
+        <ul className="mt-2 flex flex-wrap gap-2">
+          {Object.entries(
+            character.looks ?? {
+              base: {
+                description: character.description,
+                character_sheet: character.character_sheet,
+              },
+            },
+          )
+            .filter(([lookId]) => lookId !== "base")
+            .map(([lookId, look]) => (
+              <WardrobeLookRow
+                key={lookId}
+                projectName={projectName}
+                characterName={name}
+                lookId={lookId}
+                description={look.description || ""}
+                sheetPath={look.character_sheet}
+                fallbackDescription={description}
+                projectStyle={projectStyle}
+                projectStyleDescription={projectStyleDescription}
+                busy={wardrobeBusy}
+                readOnly={readOnly}
+                onBusy={setWardrobeBusy}
+                onReload={onReload}
+              />
+            ))}
+          {readOnly ? null : (
+            <li className="list-none">
+              <button
+                type="button"
+                onClick={() => setAddLookOpen(true)}
+                disabled={wardrobeBusy}
+                title={t("wardrobe_add", { ns: "assets" })}
+                aria-label={t("wardrobe_add", { ns: "assets" })}
+                className="focus-ring flex w-[4.5rem] flex-col items-stretch gap-1 rounded-lg p-0.5 disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                <div
+                  className="flex aspect-square w-full items-center justify-center rounded-md border border-dashed"
+                  style={{
+                    borderColor: "var(--color-hairline)",
+                    background: "oklch(0.18 0.010 265 / 0.35)",
+                    color: "var(--color-text-4)",
+                  }}
+                >
+                  <Plus className="h-5 w-5" />
+                </div>
+                <span className="truncate text-center text-[10px]" style={{ color: "var(--color-text-4)" }}>
+                  {t("wardrobe_add", { ns: "assets" })}
+                </span>
+              </button>
+            </li>
+          )}
+        </ul>
+      </div>
+
+      <GlassModal
+        open={addLookOpen}
+        onClose={() => {
+          if (wardrobeBusy) return;
+          setAddLookOpen(false);
+        }}
+        labelledBy={addLookTitleId}
+        widthClassName="w-full max-w-md"
+        closeOnEscape={!wardrobeBusy}
+        closeOnBackdrop={!wardrobeBusy}
+      >
+        <div className="flex items-start justify-between gap-3 px-5 pb-3 pt-5">
+          <h2
+            id={addLookTitleId}
+            className="text-[15px] font-semibold"
+            style={{ color: "var(--color-text)" }}
+          >
+            {t("wardrobe_add_modal_title", { ns: "assets" })}
+          </h2>
+          <button
+            type="button"
+            onClick={() => setAddLookOpen(false)}
+            disabled={wardrobeBusy}
+            className="focus-ring inline-flex h-7 w-7 items-center justify-center rounded-md disabled:opacity-40"
+            style={{ color: "var(--color-text-3)" }}
+            aria-label={t("common:cancel")}
+          >
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+        <div className="space-y-3 px-5 pb-5">
+          <p className="text-[11px] leading-snug" style={{ color: "var(--color-text-4)" }}>
+            {t("wardrobe_hint", { ns: "assets" })}
+          </p>
+          <input
+            type="text"
+            value={newLookId}
+            onChange={(e) => setNewLookId(e.target.value)}
+            placeholder={t("wardrobe_look_id", { ns: "assets" })}
+            className="focus-ring w-full rounded-lg px-3 py-2 text-[13px] outline-none"
+            style={FIELD_STYLE}
+          />
+          <textarea
+            value={newLookDesc}
+            onChange={(e) => setNewLookDesc(e.target.value)}
+            placeholder={t("wardrobe_look_desc", { ns: "assets" })}
+            rows={4}
+            className="focus-ring w-full resize-y rounded-lg px-3 py-2 text-[13px] outline-none"
+            style={FIELD_STYLE}
+          />
+          <button
+            type="button"
+            disabled={wardrobeBusy || !newLookId.trim()}
+            className="focus-ring rounded-lg px-3 py-2 text-[12px] disabled:cursor-not-allowed disabled:opacity-50"
+            style={{
+              background: "var(--color-accent-dim)",
+              border: "1px solid var(--color-accent-soft)",
+              color: "var(--color-accent-2)",
+            }}
+            onClick={async () => {
+              setWardrobeBusy(true);
+              try {
+                await API.createCharacterLook(projectName, name, newLookId.trim(), newLookDesc.trim());
+                setNewLookId("");
+                setNewLookDesc("");
+                setAddLookOpen(false);
+                await onReload?.();
+              } catch (err) {
+                useAppStore.getState().pushToast(errMsg(err), "error");
+              } finally {
+                setWardrobeBusy(false);
+              }
+            }}
+          >
+            {t("wardrobe_add", { ns: "assets" })}
+          </button>
+        </div>
+      </GlassModal>
 
       <div className="mt-3">
         {/* 「声音」是描述输入 + 音频样本共用的分组标题，不单独绑定输入框；
@@ -711,6 +1248,24 @@ export function CharacterCard({
         />
       </div>
       )}
+
+      <ConfirmDialog
+        open={confirmDelete}
+        tone="danger"
+        title={t(
+          character.reference_audio ? "assets:delete_confirm_with_audio" : "assets:delete_confirm",
+          { type: t("assets:type.character") },
+        )}
+        description={<span className="font-mono">「{name}」</span>}
+        confirmLabel={t("assets:delete")}
+        loadingLabel={t("assets:loading")}
+        cancelLabel={t("assets:cancel")}
+        loading={deleting}
+        onConfirm={() => void handleDelete()}
+        onCancel={() => {
+          if (!deleting) setConfirmDelete(false);
+        }}
+      />
     </div>
   );
 }

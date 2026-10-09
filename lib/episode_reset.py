@@ -19,14 +19,18 @@ from_episode-1 集原文范围末尾，源文指纹字段保留不动（已验�
 
 派生集文件按「是否可从账本重造」分流：账本条目带 ``source_range`` 的
 ``source/episode_N.txt`` 是派生物，直接删除；无 ``source_range`` 的集文件可能是
-老项目原件（含手工内容，无坐标可重造），改名留底而非删除。下游产物（剧本 JSON、
-step1 中间文件、媒体）一律不删。部分重置时上述处置只施于 from_episode 起的范围，
-保留段的派生文件与下游产物不受影响。
+老项目原件（含手工内容，无坐标可重造），改名留底而非删除。
+
+重置范围内的剧本 JSON（``scripts/episode_N.json`` 及账本 ``script_file`` 指向的
+路径）一并删除：否则文件系统监视会在账本清空后把残留剧本同步回 ``episodes``，
+写成无 ``source_range`` 的条目，堵住后续 ``plan_episodes``。step1 草稿与媒体
+产物仍保留。部分重置时上述处置只施于 from_episode 起的范围，保留段不受影响。
 """
 
 from __future__ import annotations
 
 import logging
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -48,7 +52,9 @@ from lib.episode_ledger import (
     parse_episode_num,
     parse_source_range,
 )
+from lib.episode_paths import episode_script_relpath
 from lib.formal_write import formal_write_transaction
+from lib.path_safety import safe_resolve
 from lib.project_manager import ProjectManager
 
 logger = logging.getLogger(__name__)
@@ -83,6 +89,10 @@ class EpisodeResetResult:
     consumed_episodes: list[int]
 
 
+# 与 episode_ledger.discover_product_episode_nums 同口径，枚举 scripts/ 下的集号别名。
+_SCRIPT_FILE_RE = re.compile(r"episode_([0-9]+)\.json")
+
+
 @dataclass
 class _ResetPlan:
     """一次扫描得出的处置计划：受影响集号、已消费集号、文件删除/留底清单。"""
@@ -91,6 +101,7 @@ class _ResetPlan:
     consumed: list[int]
     deletes: list[Path]
     archives: list[Path]
+    script_deletes: list[Path] = field(default_factory=list)
 
 
 def _archive_path(path: Path) -> Path:
@@ -166,6 +177,8 @@ def _scan(project_dir: Path, project: Mapping[str, Any], *, from_episode: int = 
     consumed: list[int] = []
     deletes: list[Path] = []
     archives: list[Path] = []
+    script_deletes: list[Path] = []
+    seen_scripts: set[Path] = set()
 
     def _in_scope(num: int) -> bool:
         """该集号是否落在本次处置范围内。
@@ -175,6 +188,16 @@ def _scan(project_dir: Path, project: Mapping[str, Any], *, from_episode: int = 
         挡在扫描外、悄悄留在「已清空」的账本里，违反零前置校验的承诺。
         """
         return from_episode == 1 or num >= from_episode
+
+    def _add_script(path: Path) -> None:
+        if not path.is_file():
+            return
+        # resolve 去重：同一文件可能同时来自规范路径、padding 别名与账本 script_file
+        key = path.resolve()
+        if key in seen_scripts:
+            return
+        seen_scripts.add(key)
+        script_deletes.append(path)
 
     # 账本条目、磁盘派生文件、磁盘下游产物三者取并集：
     # - 孤儿集文件（账本无对应条目）同样要处置，否则重置后它会被孤儿条目登记
@@ -194,6 +217,14 @@ def _scan(project_dir: Path, project: Mapping[str, Any], *, from_episode: int = 
         )
         if is_consumed:
             consumed.append(num)
+        # 重置范围内的剧本必须删：残留剧本会被监视同步回无 source_range 的账本条目
+        _add_script(project_dir / episode_script_relpath(num))
+        for dupe in dupes:
+            script_file = dupe.get("script_file")
+            if isinstance(script_file, str):
+                resolved = safe_resolve(project_dir, script_file)
+                if resolved is not None:
+                    _add_script(resolved)
         paths = episode_file_aliases.get(num) or []
         if not paths:
             continue
@@ -204,8 +235,26 @@ def _scan(project_dir: Path, project: Mapping[str, Any], *, from_episode: int = 
         can_recreate = all(_has_recreatable_source_range(dupe) for dupe in dupes)
         target = deletes if can_recreate else archives
         target.extend(paths)
+
+    # padding 别名（episode_01.json）未必出现在 product_nums∪账本并集之外的扫描键上，
+    # 但只要集号落在范围内就必须删，否则监视仍可能按文件名同步回账本
+    scripts_dir = project_dir / "scripts"
+    if scripts_dir.is_dir():
+        for path in scripts_dir.iterdir():
+            match = _SCRIPT_FILE_RE.fullmatch(path.name)
+            if match is None:
+                continue
+            if _in_scope(int(match.group(1))):
+                _add_script(path)
+
     episode_nums = [num for num in sorted(entries) if _in_scope(num)]
-    return _ResetPlan(episode_nums=episode_nums, consumed=consumed, deletes=deletes, archives=archives)
+    return _ResetPlan(
+        episode_nums=episode_nums,
+        consumed=consumed,
+        deletes=deletes,
+        archives=archives,
+        script_deletes=script_deletes,
+    )
 
 
 def _assert_source_directory_safe(project_dir: Path) -> None:
@@ -222,10 +271,11 @@ def _apply_files(
     *,
     archive_targets: Mapping[Path, Path] | None = None,
 ) -> tuple[list[str], list[tuple[str, str]]]:
-    """落盘文件处置：删派生集文件、留底非派生集文件、清理余文文件。
+    """落盘文件处置：删派生集文件与重置范围内剧本、留底非派生集文件、清理余文文件。
 
     失败一律抛错中止提交（账本写回随之回滚）：残留的集文件会被孤儿条目登记重新认领
-    成账本条目，「重置后账本为空」的承诺会被悄悄推翻，宁可整体失败让调用方重试。重置本身
+    成账本条目，「重置后账本为空」的承诺会被悄悄推翻；残留剧本会被监视同步成无
+    ``source_range`` 的账本条目、堵住后续规划。宁可整体失败让调用方重试。重置本身
     幂等，重跑即可自愈已完成的部分。
     """
     # source/ 是符号链接或（Windows 原生）目录联接时拒绝处置：这类 reparse point 会让
@@ -241,6 +291,12 @@ def _apply_files(
             path.unlink(missing_ok=True)
         except OSError as exc:
             raise EpisodeResetError(f"派生集文件删除失败，重置已中止：{path.name}: {exc}") from exc
+        deleted.append(_rel(project_dir, path))
+    for path in plan.script_deletes:
+        try:
+            path.unlink(missing_ok=True)
+        except OSError as exc:
+            raise EpisodeResetError(f"剧本文件删除失败，重置已中止：{path.name}: {exc}") from exc
         deleted.append(_rel(project_dir, path))
     for path in plan.archives:
         target = archive_targets[path] if archive_targets is not None else _archive_path(path)
@@ -441,7 +497,7 @@ def reset_episode_planning(
 
     两种模式都对波及已消费集（账本标 consumed 或磁盘已有剧本 / step1 产物）且未
     ``confirm_consumed`` 时不执行，返回 :class:`ResetConfirmationRequired` 等待
-    显式确认；确认后执行，下游产物一律保留。
+    显式确认；确认后执行，重置范围内的剧本 JSON 删除，step1 草稿与媒体产物保留。
 
     Raises:
         EpisodeResetError: ``from_episode`` 非正整数、部分重置前置校验未通过、或
@@ -520,7 +576,7 @@ def reset_episode_planning(
         _assert_source_directory_safe(project_dir)
         archive_targets = {path: _archive_path(path) for path in commit_plan.archives}
         remaining = project_dir / "source" / "_remaining.txt"
-        transaction_paths = [*commit_plan.deletes, remaining]
+        transaction_paths = [*commit_plan.deletes, *commit_plan.script_deletes, remaining]
         for source, target in archive_targets.items():
             transaction_paths.extend((source, target))
 

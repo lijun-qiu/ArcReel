@@ -7,10 +7,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
+import uuid
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
+import httpx
 from fastapi import APIRouter, File, HTTPException, Response, UploadFile, status
 from pydantic import BaseModel, ConfigDict, Field, PositiveInt
 
@@ -55,6 +59,7 @@ from lib.reference_video.units import reference_video_bucket
 from lib.reference_video.voice_settings import VoiceRenderSettings
 from lib.resource_paths import resource_relative_path
 from lib.script_editor import ScriptEditError
+from lib.script_models import get_generated_assets
 from lib.speech_composition import admit_script_unit, refresh_video_unit_replan_state
 from lib.version_manager import VersionManager
 from server.auth import CurrentUser
@@ -67,6 +72,7 @@ from server.services.narration_delivery_tasks import (
     prepare_current_reference_video_request_options,
     tts_task_in_progress,
 )
+from server.services.realesrgan_upscale import projects_rel_path, request_host_upscale
 from server.services.reference_video_tasks import (
     apply_unit_video_assets,
     default_unit_duration,
@@ -133,6 +139,8 @@ class GenerateUnitsBatchRequest(BaseModel):
 
     ``unit_ids`` 省略时只补齐缺失项；指定 id 则重新生成对应单元。
     ``confirmed_request_durations`` 为用户在聚合确认中接受的时长档位。
+    ``use_agnes_key_pool`` 为真时，任务 payload 带同名标志，worker 按 Agnes 凭证 key 数抬升并发。
+    凭证已配置多把 key 时，即使本字段为假，worker 也会按「一 key 一路」租约轮换（避免默认多槽打在同一 key）。
     """
 
     unit_ids: list[str] | None = None
@@ -140,6 +148,7 @@ class GenerateUnitsBatchRequest(BaseModel):
     # 整批按另一种交付方式准入，而调用方并不知道自己选过。
     narration_delivery: NarrationDelivery
     confirmed_request_durations: dict[str, PositiveInt] = Field(default_factory=dict)
+    use_agnes_key_pool: bool = False
 
     def projection_options(self) -> ReferenceRequestOptions:
         return ReferenceRequestOptions(narration_delivery=self.narration_delivery)
@@ -775,10 +784,13 @@ async def generate_units_batch(
             spec.resource_id,
             body.confirmed_request_durations,
         )
-        spec.payload = {
+        task_payload = {
             **(spec.payload or {}),
             "reference_request_options": options.to_payload(),
         }
+        if body.use_agnes_key_pool:
+            task_payload["use_agnes_key_pool"] = True
+        spec.payload = task_payload
     enqueued, enqueue_failures = await batch_enqueue_only(project_name=project_name, specs=specs, user_id=user.id)
     # 入队中断不撤销已创建的任务：它们是准入通过的完整付费单元，照常执行。没轮到的目标
     # 逐 ID 报出来，界面据此释放乐观占用标记，下次「缺失即生成」只补这些。
@@ -895,3 +907,401 @@ async def upload_unit_video(
         # 不回传 str(exc)：未预期异常的消息可能含服务器路径等内部细节，堆栈进日志即可
         logger.exception("请求处理失败")
         raise HTTPException(status_code=500, detail=_t("internal_server_error")) from exc
+
+
+@router.post("/episodes/{episode}/units/{unit_id}/upscale-video")
+async def upscale_unit_video(
+    project_name: str,
+    episode: int,
+    unit_id: str,
+    _t: Translator,
+) -> dict[str, Any]:
+    """对本机 Real-ESRGAN 主机代理超分当前单元成片，再按上传同口径版本化写回。"""
+    try:
+        relative_path = resource_relative_path("reference_videos", unit_id)
+
+        def _prepare() -> tuple[Path, Path, Path, VersionManager, str, str, str]:
+            project, script, script_file = _load_episode_script(project_name, episode, _t)
+            unit = _find_unit_for_project(project, script, unit_id, _t)
+            clip_rel = get_generated_assets(unit).get("video_clip")
+            if not isinstance(clip_rel, str) or not clip_rel.strip():
+                raise HTTPException(status_code=400, detail=_t("ref_unit_no_video", unit_id=unit_id))
+            project_path = get_project_manager().get_project_path(project_name)
+            projects_root = project_path.parent
+            try:
+                safe_join(project_path, relative_path)
+                current = safe_join(project_path, clip_rel)
+            except PathTraversalError as exc:
+                raise HTTPException(status_code=400, detail=_t("invalid_resource_id", resource_id=unit_id)) from exc
+            if not current.is_file():
+                raise HTTPException(status_code=404, detail=_t("ref_unit_video_missing", unit_id=unit_id))
+            staged = current.with_name(f".{current.stem}.{uuid.uuid4().hex[:8]}.tmp{current.suffix}")
+            input_rel = projects_rel_path(current, projects_root)
+            output_rel = projects_rel_path(staged, projects_root)
+            return (
+                project_path,
+                current,
+                staged,
+                VersionManager(project_path),
+                script_file,
+                input_rel,
+                output_rel,
+            )
+
+        project_path, current, staged, versions, script_file, input_rel, output_rel = await asyncio.to_thread(
+            _prepare
+        )
+
+        try:
+            await request_host_upscale(input_rel=input_rel, output_rel=output_rel)
+        except httpx.HTTPError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail=_t("realesrgan_proxy_unreachable"),
+            ) from exc
+        except RuntimeError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+        if not staged.is_file():
+            raise HTTPException(status_code=502, detail=_t("realesrgan_output_missing"))
+
+        target = project_path / relative_path
+
+        with project_change_source("webui"):
+
+            def _recheck_binding() -> str:
+                project2, script2, script_file2 = _load_episode_script(project_name, episode, _t)
+                _find_unit_for_project(project2, script2, unit_id, _t)
+                return script_file2
+
+            try:
+                script_file = await asyncio.to_thread(_recheck_binding)
+
+                def _commit_metadata(thumb_rel: str | None, on_commit: Callable[[Path], None]) -> None:
+                    pm = get_project_manager()
+                    with pm.locked_script(
+                        project_name,
+                        script_file,
+                        validate=False,
+                        on_commit=on_commit,
+                    ) as script:
+                        apply_unit_video_assets(script, unit_id, video_uri=None, thumb_rel=thumb_rel)
+
+                version = await commit_manual_video_upload(
+                    project_path=project_path,
+                    versions=versions,
+                    resource_type="reference_videos",
+                    resource_id=unit_id,
+                    script_file=script_file,
+                    staged_video=staged,
+                    current_video=target,
+                    thumbnail_file=project_path / "reference_videos" / "thumbnails" / f"{unit_id}.jpg",
+                    thumbnail_rel=f"reference_videos/thumbnails/{unit_id}.jpg",
+                    original_filename=f"{unit_id}_upscaled.mp4",
+                    commit_metadata=_commit_metadata,
+                )
+            finally:
+                await asyncio.to_thread(staged.unlink, missing_ok=True)
+
+            fingerprints = await asyncio.to_thread(
+                emit_generation_success_batch,
+                task_type="reference_video",
+                project_name=project_name,
+                resource_id=unit_id,
+                payload={"script_file": script_file},
+            )
+
+        return {
+            "success": True,
+            "path": relative_path,
+            "version": version,
+            "asset_fingerprints": fingerprints,
+        }
+    except FileNotFoundError as exc:
+        raise NotFoundError("ref_script_missing") from exc
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=_t("ref_unit_not_found", unit_id=unit_id)) from exc
+    except ScriptEditError as exc:
+        raise HTTPException(status_code=400, detail=script_edit_detail(exc, _t)) from exc
+    except (HTTPException, ApiError):
+        raise
+    except Exception as exc:
+        logger.exception("超分请求处理失败")
+        raise HTTPException(status_code=500, detail=_t("internal_server_error")) from exc
+
+
+def _episode_preview_payload(
+    project_name: str,
+    result: Any,
+    *,
+    exists: bool | None = None,
+    upscaled: Any | None = None,
+) -> dict[str, object]:
+    # Content-addressed ``?v=`` for /files: prefer file mtime so in-place upscale
+    # invalidates the browser immutable cache without requiring a path change.
+    revision: int | None = None
+    abs_path = getattr(result, "absolute_path", None)
+    if abs_path is not None:
+        try:
+            st = Path(abs_path).stat()
+            revision = int(st.st_mtime_ns // 1_000_000)  # ms
+        except OSError:
+            revision = None
+    body: dict[str, object] = {
+        "relative_path": result.relative_path,
+        "url": f"/api/v1/files/{quote(project_name, safe='')}/{result.relative_path}",
+        "subtitles_webvtt": result.subtitles_webvtt,
+        "subtitles": [cue.to_dict() for cue in result.subtitles],
+        "revision": revision,
+        "upscaled_exists": False,
+        "upscaled_relative_path": None,
+        "upscaled_url": None,
+        "upscaled_revision": None,
+    }
+    if exists is not None:
+        body["exists"] = exists
+    if upscaled is not None:
+        up_rev: int | None = None
+        up_abs = getattr(upscaled, "absolute_path", None)
+        if up_abs is not None:
+            try:
+                up_rev = int(Path(up_abs).stat().st_mtime_ns // 1_000_000)
+            except OSError:
+                up_rev = None
+        body["upscaled_exists"] = True
+        body["upscaled_relative_path"] = upscaled.relative_path
+        body["upscaled_url"] = (
+            f"/api/v1/files/{quote(project_name, safe='')}/{upscaled.relative_path}"
+        )
+        body["upscaled_revision"] = up_rev
+    return body
+
+
+async def _materialize_preview_presentations(project_name: str, episode: int):
+    """集预览混音与字幕与剪映导出同口径：旁白单元走 use_tts，失败时不阻断视频合成。"""
+    from server.services.presentation_read_model import (
+        PresentationReadModelService,
+        PresentationUnavailableError,
+    )
+
+    try:
+        materialized = await PresentationReadModelService(get_project_manager()).materialize_episode(
+            project_name=project_name,
+            episode=episode,
+            variant=USE_TTS,
+        )
+    except PresentationUnavailableError:
+        logger.warning(
+            "集预览成片物化失败，继续仅合成视频 project=%s episode=%s",
+            project_name,
+            episode,
+            exc_info=True,
+        )
+        return None
+    except Exception:
+        logger.exception(
+            "集预览成片物化异常，继续仅合成视频 project=%s episode=%s",
+            project_name,
+            episode,
+        )
+        return None
+    return tuple(item.presentation for item in materialized.presentations)
+
+
+@router.get("/episodes/{episode}/preview")
+async def get_episode_preview(project_name: str, episode: int, _t: Translator) -> dict[str, object]:
+    """查询本集预览 MP4 是否已合成（不触发重新拼接）。"""
+    _load_episode_script(project_name, episode, _t)
+
+    from server.services.episode_preview_compose import (
+        EpisodePreviewResult,
+        resolve_episode_preview,
+        resolve_episode_preview_upscaled,
+        write_episode_preview_subtitles,
+    )
+
+    pm = get_project_manager()
+    result = await asyncio.to_thread(
+        resolve_episode_preview,
+        project_name=project_name,
+        episode=episode,
+        project_manager=pm,
+    )
+    if result is None:
+        return {
+            "exists": False,
+            "relative_path": None,
+            "url": None,
+            "revision": None,
+            "subtitles_webvtt": None,
+            "subtitles": [],
+            "upscaled_exists": False,
+            "upscaled_relative_path": None,
+            "upscaled_url": None,
+            "upscaled_revision": None,
+        }
+
+    # 旧预览可能只有 MP4：观看时按当前 presentation 补写 VTT sidecar，避免强制重切。
+    if result.subtitles_webvtt is None:
+        presentations = await _materialize_preview_presentations(project_name, episode)
+        if presentations is not None:
+            project_dir = Path(pm.get_project_path(project_name))
+            written = await asyncio.to_thread(
+                write_episode_preview_subtitles,
+                project_dir=project_dir,
+                episode=episode,
+                presentations=presentations,
+            )
+            if written is not None:
+                sub_rel, sub_abs, webvtt, cues = written
+                result = EpisodePreviewResult(
+                    relative_path=result.relative_path,
+                    absolute_path=result.absolute_path,
+                    subtitles_relative_path=sub_rel,
+                    subtitles_absolute_path=sub_abs,
+                    subtitles_webvtt=webvtt,
+                    subtitles=cues,
+                )
+
+    upscaled = await asyncio.to_thread(
+        resolve_episode_preview_upscaled,
+        project_name=project_name,
+        episode=episode,
+        project_manager=pm,
+    )
+    return _episode_preview_payload(project_name, result, exists=True, upscaled=upscaled)
+
+
+@router.post("/episodes/{episode}/preview-compose")
+async def compose_episode_preview(project_name: str, episode: int, _t: Translator) -> dict[str, object]:
+    """把本集全部参考视频单元硬切合成为 ``output/episode_N_preview.mp4``。"""
+    # 先走与 CRUD 相同的集绑定校验，把非参考生视频 / 缺集拒绝掉。
+    _load_episode_script(project_name, episode, _t)
+
+    from server.services.episode_preview_compose import (
+        EmptyEpisodeUnitsError,
+        FfmpegUnavailableError,
+        MissingUnitClipsError,
+        NotReferenceVideoScriptError,
+        compose_reference_episode_preview,
+    )
+
+    presentations = await _materialize_preview_presentations(project_name, episode)
+
+    try:
+        result = await asyncio.to_thread(
+            compose_reference_episode_preview,
+            project_name=project_name,
+            episode=episode,
+            project_manager=get_project_manager(),
+            presentations=presentations,
+        )
+    except MissingUnitClipsError as exc:
+        raise ApiError(
+            "episode_preview_missing_clips",
+            status_code=422,
+            episode=episode,
+            unit_ids=", ".join(exc.missing_unit_ids),
+        ) from exc
+    except EmptyEpisodeUnitsError as exc:
+        raise ApiError("episode_preview_empty", status_code=422, episode=episode) from exc
+    except NotReferenceVideoScriptError as exc:
+        raise HTTPException(status_code=409, detail=_t("ref_not_reference_video_mode")) from exc
+    except FfmpegUnavailableError as exc:
+        raise ApiError("episode_preview_ffmpeg_unavailable", status_code=503) from exc
+    except FileNotFoundError:
+        raise
+    except Exception as exc:
+        logger.exception(
+            "合成本集预览失败 project=%s episode=%s",
+            project_name,
+            episode,
+        )
+        raise ApiError("episode_preview_failed", status_code=500) from exc
+
+    from server.services.episode_preview_compose import resolve_episode_preview_upscaled
+
+    upscaled = await asyncio.to_thread(
+        resolve_episode_preview_upscaled,
+        project_name=project_name,
+        episode=episode,
+        project_manager=get_project_manager(),
+    )
+    return _episode_preview_payload(project_name, result, upscaled=upscaled)
+
+
+@router.post("/episodes/{episode}/upscale-preview")
+async def upscale_episode_preview(project_name: str, episode: int, _t: Translator) -> dict[str, object]:
+    """对本集已合成预览做 Real-ESRGAN 超分，写入独立的 ``*_preview_upscaled.mp4``。"""
+    _load_episode_script(project_name, episode, _t)
+
+    from server.services.episode_preview_compose import (
+        preview_upscaled_relative_path,
+        resolve_episode_preview,
+        resolve_episode_preview_upscaled,
+    )
+
+    pm = get_project_manager()
+    project_path = pm.get_project_path(project_name)
+    projects_root = project_path.parent
+
+    existing = await asyncio.to_thread(
+        resolve_episode_preview,
+        project_name=project_name,
+        episode=episode,
+        project_manager=pm,
+    )
+    if existing is None:
+        raise HTTPException(status_code=404, detail=_t("episode_preview_not_found", episode=episode))
+
+    relative = preview_upscaled_relative_path(episode)
+    try:
+        target = (project_path / relative).resolve()
+        # Keep under project root (relative has no ``..``).
+        if not str(target).startswith(str(project_path.resolve()) + os.sep):
+            raise ValueError("path escapes project")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=_t("invalid_resource_id", resource_id=relative)) from exc
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    staged = target.with_name(f".{target.stem}.{uuid.uuid4().hex[:8]}.tmp{target.suffix}")
+
+    try:
+        input_rel = projects_rel_path(existing.absolute_path, projects_root)
+        output_rel = projects_rel_path(staged, projects_root)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=_t("invalid_resource_id", resource_id=relative)) from exc
+
+    try:
+        await request_host_upscale(input_rel=input_rel, output_rel=output_rel)
+    except httpx.HTTPError as exc:
+        await asyncio.to_thread(staged.unlink, missing_ok=True)
+        raise HTTPException(status_code=503, detail=_t("realesrgan_proxy_unreachable")) from exc
+    except RuntimeError as exc:
+        await asyncio.to_thread(staged.unlink, missing_ok=True)
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    if not staged.is_file():
+        raise HTTPException(status_code=502, detail=_t("realesrgan_output_missing"))
+
+    try:
+        await asyncio.to_thread(os.replace, staged, target)
+    except OSError:
+        await asyncio.to_thread(staged.unlink, missing_ok=True)
+        raise
+
+    refreshed = await asyncio.to_thread(
+        resolve_episode_preview,
+        project_name=project_name,
+        episode=episode,
+        project_manager=pm,
+    )
+    upscaled = await asyncio.to_thread(
+        resolve_episode_preview_upscaled,
+        project_name=project_name,
+        episode=episode,
+        project_manager=pm,
+    )
+    if refreshed is None or upscaled is None:
+        raise HTTPException(status_code=502, detail=_t("realesrgan_output_missing"))
+    return _episode_preview_payload(project_name, refreshed, exists=True, upscaled=upscaled)

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
+  Ban,
   ChevronLeft,
   ChevronRight,
   Clock,
@@ -16,9 +17,11 @@ import { ReferenceVideoCard } from "./ReferenceVideoCard";
 import { ScriptPreviewPanel } from "./ScriptPreviewPanel";
 import { deriveUnitStatus } from "./unit-status";
 import { EpisodeHeader } from "./EpisodeHeader";
+import { useRealEsrganProgress } from "./useRealEsrganProgress";
 import { ReferenceDurationConfirmDialog } from "./ReferenceDurationConfirmDialog";
 import { ReferenceBatchAdmissionDialog } from "./ReferenceBatchAdmissionDialog";
 import { NarrationDeliveryChoice } from "@/components/shared/NarrationDeliveryChoice";
+import { IndexTtsServiceControls } from "@/components/shared/IndexTtsServiceControls";
 import { computeVoiceLegacyNotice, VoiceLegacyBanner } from "./VoiceLegacyBanner";
 import { useReferenceDurationGate } from "@/hooks/useReferenceDurationGate";
 import { ReferenceStep1PreviewPanel } from "@/components/canvas/reference/ReferenceStep1PreviewPanel";
@@ -34,8 +37,10 @@ import {
 } from "@/stores/reference-video-store";
 import {
   isResourceBusy,
+  selectLatestTaskByResource,
   useActiveResourceIds,
   useLatestTasksByResource,
+  useTasksStore,
 } from "@/stores/tasks-store";
 import { useAppStore } from "@/stores/app-store";
 import { useProjectsStore } from "@/stores/projects-store";
@@ -53,6 +58,25 @@ import type {
   ReferenceVideoUnit,
   UnitStatus,
 } from "@/types";
+
+/**
+ * Agnes 视频「一 key 一路」批量入队上限：与供应商默认 video 并发 / Key 池规模对齐。
+ * 一次点批量只提交这么多，避免把十几路全塞进队列后占满 Key、还撞上 queue_full。
+ */
+export const REFERENCE_VIDEO_BATCH_MAX = 7;
+
+function takeReferenceBatchSlice(unitIds: string[]): {
+  taken: string[];
+  deferred: number;
+} {
+  if (unitIds.length <= REFERENCE_VIDEO_BATCH_MAX) {
+    return { taken: unitIds, deferred: 0 };
+  }
+  return {
+    taken: unitIds.slice(0, REFERENCE_VIDEO_BATCH_MAX),
+    deferred: unitIds.length - REFERENCE_VIDEO_BATCH_MAX,
+  };
+}
 
 export interface ReferenceVideoCanvasProps {
   projectName: string;
@@ -235,6 +259,52 @@ export function ReferenceVideoCanvas({
     void loadUnits(projectName, episode);
   }, [loadUnits, projectName, episode, hasScript, unitsRevision]);
 
+  // 已落盘的本集预览（output/episode_N_preview.mp4）；切集重探，合成后由回调覆盖。
+  const [episodePreviewUrl, setEpisodePreviewUrl] = useState<string | null>(null);
+  const [episodeUpscaledUrl, setEpisodeUpscaledUrl] = useState<string | null>(null);
+  const [episodePreviewSubtitlesWebvtt, setEpisodePreviewSubtitlesWebvtt] = useState<string | null>(
+    null,
+  );
+  const [episodePreviewSubtitles, setEpisodePreviewSubtitles] = useState<
+    Array<{ start_microseconds: number; duration_microseconds: number; text: string }>
+  >([]);
+  useEffect(() => {
+    if (!hasScript) {
+      setEpisodePreviewUrl(null);
+      setEpisodeUpscaledUrl(null);
+      setEpisodePreviewSubtitlesWebvtt(null);
+      setEpisodePreviewSubtitles([]);
+      return;
+    }
+    const controller = new AbortController();
+    void (async () => {
+      try {
+        const res = await API.getReferenceEpisodePreview(projectName, episode, {
+          signal: controller.signal,
+        });
+        if (controller.signal.aborted) return;
+        setEpisodePreviewUrl(
+          res.exists && res.url ? `${res.url}?v=${res.revision ?? Date.now()}` : null,
+        );
+        setEpisodeUpscaledUrl(
+          res.upscaled_exists && res.upscaled_url
+            ? `${res.upscaled_url}?v=${res.upscaled_revision ?? Date.now()}`
+            : null,
+        );
+        setEpisodePreviewSubtitlesWebvtt(res.subtitles_webvtt ?? null);
+        setEpisodePreviewSubtitles(res.subtitles ?? []);
+      } catch {
+        if (!controller.signal.aborted) {
+          setEpisodePreviewUrl(null);
+          setEpisodeUpscaledUrl(null);
+          setEpisodePreviewSubtitlesWebvtt(null);
+          setEpisodePreviewSubtitles([]);
+        }
+      }
+    })();
+    return () => controller.abort();
+  }, [projectName, episode, hasScript]);
+
   const selected = useMemo(
     () => units.find((u) => u.unit_id === selectedUnitId) ?? null,
     [units, selectedUnitId],
@@ -270,34 +340,40 @@ export function ReferenceVideoCanvas({
   // 让位，故「请求发出 → 任务行落库」全程都被覆盖，画布无须自备请求在途标记。
   const busyUnitIds = useActiveResourceIds("reference_video", projectName);
   const ttsBusyUnitIds = useActiveResourceIds("tts", projectName);
+  const ttsTasksByUnit = useLatestTasksByResource(projectName, "tts");
+  const [fillingNarration, setFillingNarration] = useState(false);
 
-  // 成片上传、版本恢复与时长保存都不产生任务行，进不了 tasks-store 占用集，故在画布层按 unit 记录。
+  // 成片上传、超分、版本恢复与时长保存都不产生任务行，进不了 tasks-store 占用集，故在画布层按 unit 记录。
   // 存在这里而非 UnitPreviewPanel 内：该面板有窄屏 sub-tab 与宽屏右栏两处挂载点，切换子页
   // 或跨越 STACK_PREVIEW_BREAKPOINT 都会卸载它（在途请求不会因此取消），且它随选中项切换
   // 复用，面板内的单个布尔量还会把 A 的占用态串到 B 上。
   const uploading = useUnitFlagSet();
+  const upscaling = useUnitFlagSet();
   const restoring = useUnitFlagSet();
   const durationSaving = useUnitFlagSet();
+  const upscaleProgress = useRealEsrganProgress(upscaling.ids.size > 0);
 
   const setUploading = uploading.set;
+  const setUpscaling = upscaling.set;
   const handleRestoringChange = restoring.set;
   const setDurationSaving = durationSaving.set;
 
-  /** 该 unit 是否被任一写入路径占用：生成（tasks-store 占用集）、成片上传、版本恢复或时长保存。 */
+  /** 该 unit 是否被任一写入路径占用：生成（tasks-store 占用集）、成片上传、超分、版本恢复或时长保存。 */
   const isUnitLocked = useCallback(
     (unitId: string) =>
       isUnitBusy(projectName, unitId) ||
       uploading.ref.current.has(unitId) ||
+      upscaling.ref.current.has(unitId) ||
       restoring.ref.current.has(unitId) ||
       durationSaving.ref.current.has(unitId),
-    [projectName, uploading.ref, restoring.ref, durationSaving.ref],
+    [projectName, uploading.ref, upscaling.ref, restoring.ref, durationSaving.ref],
   );
 
   const statusMap = useMemo<Record<string, UnitStatus>>(() => {
     const map: Record<string, UnitStatus> = {};
     for (const u of units) {
       map[u.unit_id] = deriveUnitStatus({
-        hasClip: Boolean(u.generated_assets.video_clip),
+        hasClip: Boolean(u.generated_assets?.video_clip),
         queueRow: tasksByUnit.get(u.unit_id),
         busy: busyUnitIds.has(u.unit_id),
         uploading: uploading.ids.has(u.unit_id),
@@ -358,13 +434,14 @@ export function ReferenceVideoCanvas({
   );
 
   /**
-   * 批量入口的复核：只问「这个 unit 还缺成片吗」。
+   * 批量入口的复核：问「这个 unit 还该进本批吗」——尚无成片，或最新任务失败（含旧成片仍在的
+   * 重新生成失败，需重试）。
    *
    * needs_replan、在途任务这类问题不在这里过滤——它们正是服务端准入要逐条报告、并据此
    * 让整批零任务入队的缺口；在浏览器里先摘掉，服务端看到的就只剩健康子集，会照常建任务，
    * 用户既看不到缺口也失去了全有或全无的保证。
    *
-   * 已有成片的单元不同：它已经不是「缺成片」的目标。任务完成后该 unit 不再 busy，而队列
+   * 已有成片且最新任务并非失败时：它已经不是批量目标。任务完成后该 unit 不再 busy，而队列
    * 去重只看 queued/running/cancelling，确认弹窗停留期间完成的单元若原样提交，会再跑一次
    * 生成、重复计费并覆盖刚出的成片。实时读 store 而非渲染期 units 快照。
    *
@@ -375,15 +452,22 @@ export function ReferenceVideoCanvas({
       // 只排除本画布自己的写入（服务端看不到它们）：生成占用与 needs_replan 交给准入去报告。
       const hasLocalWrite =
         uploading.ref.current.has(unitId) ||
+        upscaling.ref.current.has(unitId) ||
         restoring.ref.current.has(unitId) ||
         durationSaving.ref.current.has(unitId);
       if (hasLocalWrite) return false;
       const fresh = useReferenceVideoStore
         .getState()
         .unitsByEpisode[referenceVideoCacheKey(projectName, episode)]?.find((u) => u.unit_id === unitId);
-      return !fresh?.generated_assets?.video_clip;
+      if (!fresh?.generated_assets?.video_clip) return true;
+      // 有成片仍可进批：最新 reference_video 行为 failed = 重新生成失败，需要重试。
+      const latest = selectLatestTaskByResource(useTasksStore.getState().tasks, {
+        projectName,
+        taskType: "reference_video",
+      }).get(unitId);
+      return latest?.status === "failed";
     },
-    [projectName, episode, uploading.ref, restoring.ref, durationSaving.ref],
+    [projectName, episode, uploading.ref, upscaling.ref, restoring.ref, durationSaving.ref],
   );
 
   const durationGate = useReferenceDurationGate({
@@ -504,6 +588,39 @@ export function ReferenceVideoCanvas({
     [projectName, episode, loadUnits, isUnitLocked, setUploading, t],
   );
 
+  const handleUpscaleVideo = useCallback(
+    async (unitId: string) => {
+      if (isUnitLocked(unitId)) {
+        useAppStore.getState().pushToast(t("reference_generate_busy"), "error");
+        return;
+      }
+      setUpscaling(unitId, true);
+      try {
+        try {
+          await API.ensureRealEsrgan();
+        } catch {
+          // ensure is best-effort; upscale surfaces unreachable errors.
+        }
+        try {
+          const result = await API.upscaleReferenceUnitVideo(projectName, episode, unitId);
+          useProjectsStore.getState().updateAssetFingerprints(result.asset_fingerprints);
+          useAppStore.getState().pushToast(t("reference_upscale_success", { id: unitId }), "success");
+        } catch (e) {
+          toastError(e, (msg) => t("reference_upscale_failed", { message: msg }));
+          return;
+        }
+        try {
+          await loadUnits(projectName, episode);
+        } catch (e) {
+          toastError(e, (msg) => t("media_refresh_failed", { message: msg }));
+        }
+      } finally {
+        setUpscaling(unitId, false);
+      }
+    },
+    [projectName, episode, loadUnits, isUnitLocked, setUpscaling, t],
+  );
+
   const handleUnitsRefresh = useCallback(
     () => loadUnits(projectName, episode),
     [loadUnits, projectName, episode],
@@ -526,6 +643,185 @@ export function ReferenceVideoCanvas({
     },
     [episode, projectName, t],
   );
+
+  // 一键补旁白：只处理有旁白正文、且尚未落盘或最新 TTS 任务失败的单元；逐个入队，
+  // 进行中的跳过。成功 toast 在循环结束后汇总，避免每个 unit 刷一条。
+  const narrationFillTargets = useMemo(
+    () =>
+      units.filter((u) => {
+        if (!unitNarrationText(u)) return false;
+        if (!u.generated_assets?.narration_audio) return true;
+        return ttsTasksByUnit.get(u.unit_id)?.status === "failed";
+      }),
+    [units, ttsTasksByUnit],
+  );
+
+  const handleFillNarration = useCallback(async () => {
+    if (fillingNarration) return;
+    const scriptFile = useProjectsStore
+      .getState()
+      .currentProjectData?.episodes?.find((item) => item.episode === episode)?.script_file;
+    if (!scriptFile) {
+      useAppStore.getState().pushToast(t("timeline_script_not_ready"), "error");
+      return;
+    }
+    if (narrationFillTargets.length === 0) {
+      useAppStore.getState().pushToast(t("batch_narration_none"), "info");
+      return;
+    }
+    setFillingNarration(true);
+    let queued = 0;
+    let skippedBusy = 0;
+    try {
+      for (const unit of narrationFillTargets) {
+        if (isResourceBusy("tts", projectName, unit.unit_id)) {
+          skippedBusy += 1;
+          continue;
+        }
+        try {
+          await enqueueNarration(projectName, unit.unit_id, scriptFile, { notify: false });
+          queued += 1;
+        } catch (error) {
+          toastError(error, (message) => t("generate_narration_failed", { message }));
+        }
+      }
+      if (queued > 0) {
+        useAppStore.getState().pushToast(t("batch_narration_queued", { count: queued }), "success");
+      } else if (skippedBusy > 0) {
+        useAppStore.getState().pushToast(
+          t("batch_narration_skipped_busy", { count: skippedBusy }),
+          "info",
+        );
+      } else {
+        useAppStore.getState().pushToast(t("batch_narration_none"), "info");
+      }
+    } finally {
+      setFillingNarration(false);
+    }
+  }, [episode, fillingNarration, narrationFillTargets, projectName, t]);
+
+  const handleComposePreview = useCallback(async () => {
+    try {
+      const result = await API.composeReferenceEpisodePreview(projectName, episode);
+      const busted = `${result.url}?v=${result.revision ?? Date.now()}`;
+      setEpisodePreviewUrl(busted);
+      setEpisodeUpscaledUrl(
+        result.upscaled_exists && result.upscaled_url
+          ? `${result.upscaled_url}?v=${result.upscaled_revision ?? Date.now()}`
+          : null,
+      );
+      setEpisodePreviewSubtitlesWebvtt(result.subtitles_webvtt ?? null);
+      setEpisodePreviewSubtitles(result.subtitles ?? []);
+      useAppStore.getState().pushToast(t("reference_episode_compose_preview_success"), "success");
+      return {
+        url: result.url,
+        revision: result.revision,
+        subtitles_webvtt: result.subtitles_webvtt,
+        subtitles: result.subtitles,
+      };
+    } catch (error) {
+      useAppStore.getState().pushToast(
+        t("reference_episode_compose_preview_failed", { error: errMsg(error) }),
+        "error",
+      );
+      throw error;
+    }
+  }, [episode, projectName, t]);
+
+  const handleUpscalePreview = useCallback(async () => {
+    try {
+      try {
+        await API.ensureRealEsrgan();
+      } catch {
+        // ensure is best-effort; upscale surfaces unreachable errors.
+      }
+      const result = await API.upscaleReferenceEpisodePreview(projectName, episode);
+      setEpisodePreviewUrl(
+        result.url ? `${result.url}?v=${result.revision ?? Date.now()}` : null,
+      );
+      const upUrl = result.upscaled_url;
+      const upBusted = upUrl
+        ? `${upUrl}?v=${result.upscaled_revision ?? Date.now()}`
+        : null;
+      setEpisodeUpscaledUrl(upBusted);
+      setEpisodePreviewSubtitlesWebvtt(result.subtitles_webvtt ?? null);
+      setEpisodePreviewSubtitles(result.subtitles ?? []);
+      useAppStore.getState().pushToast(t("reference_episode_upscale_preview_success"), "success");
+      // Open the dedicated upscaled file after success.
+      return {
+        url: upBusted ?? `${result.url}?v=${result.revision ?? Date.now()}`,
+        revision: result.upscaled_revision ?? result.revision,
+        subtitles_webvtt: result.subtitles_webvtt,
+        subtitles: result.subtitles,
+      };
+    } catch (error) {
+      useAppStore.getState().pushToast(
+        t("reference_episode_upscale_preview_failed", { error: errMsg(error) }),
+        "error",
+      );
+      throw error;
+    }
+  }, [episode, projectName, t]);
+
+  /** Re-probe composed preview (not the upscaled sidecar). */
+  const handleWatchEpisodePreview = useCallback(async () => {
+    try {
+      const res = await API.getReferenceEpisodePreview(projectName, episode);
+      if (!res.exists || !res.url) {
+        useAppStore.getState().pushToast(t("reference_episode_watch_preview_disabled"), "error");
+        return null;
+      }
+      const busted = `${res.url}?v=${res.revision ?? Date.now()}`;
+      setEpisodePreviewUrl(busted);
+      setEpisodeUpscaledUrl(
+        res.upscaled_exists && res.upscaled_url
+          ? `${res.upscaled_url}?v=${res.upscaled_revision ?? Date.now()}`
+          : null,
+      );
+      setEpisodePreviewSubtitlesWebvtt(res.subtitles_webvtt ?? null);
+      setEpisodePreviewSubtitles(res.subtitles ?? []);
+      return {
+        url: busted,
+        subtitles_webvtt: res.subtitles_webvtt,
+        subtitles: res.subtitles,
+      };
+    } catch (error) {
+      useAppStore.getState().pushToast(
+        t("reference_episode_compose_preview_failed", { error: errMsg(error) }),
+        "error",
+      );
+      return null;
+    }
+  }, [episode, projectName, t]);
+
+  /** Re-probe upscaled sidecar and open it. */
+  const handleWatchUpscaledPreview = useCallback(async () => {
+    try {
+      const res = await API.getReferenceEpisodePreview(projectName, episode);
+      if (!res.upscaled_exists || !res.upscaled_url) {
+        useAppStore.getState().pushToast(t("reference_episode_watch_upscaled_disabled"), "error");
+        return null;
+      }
+      const busted = `${res.upscaled_url}?v=${res.upscaled_revision ?? Date.now()}`;
+      setEpisodeUpscaledUrl(busted);
+      if (res.exists && res.url) {
+        setEpisodePreviewUrl(`${res.url}?v=${res.revision ?? Date.now()}`);
+      }
+      setEpisodePreviewSubtitlesWebvtt(res.subtitles_webvtt ?? null);
+      setEpisodePreviewSubtitles(res.subtitles ?? []);
+      return {
+        url: busted,
+        subtitles_webvtt: res.subtitles_webvtt,
+        subtitles: res.subtitles,
+      };
+    } catch (error) {
+      useAppStore.getState().pushToast(
+        t("reference_episode_upscale_preview_failed", { error: errMsg(error) }),
+        "error",
+      );
+      return null;
+    }
+  }, [episode, projectName, t]);
   const onGenerateNarrationVoid = useCallback(
     (unitId: string) => {
       void handleGenerateNarration(unitId);
@@ -533,12 +829,16 @@ export function ReferenceVideoCanvas({
     [handleGenerateNarration],
   );
 
-  // 批量生成的作用对象：全部尚无成片的 unit（含 needs_replan、在途、失败重试）。按钮禁用须与
-  // 它同一口径——只看当前选中 unit 是否在跑、与作用对象无关的判定会脱节：选中项空闲时按钮会在
-  // 没有任何待生成 unit 的情况下仍可点击，选中项在跑时又会挡住其余 unit 的批量生成。
+  // 批量生成的作用对象：尚无成片的 unit（含 needs_replan、在途、失败无成片），以及最新任务
+  // 失败但旧成片仍在的单元（展示上可能是 ready，因 supportsManualUpload 不让失败盖住可播放成片）。
+  // 按钮禁用须与它同一口径——只看当前选中 unit 是否在跑、与作用对象无关的判定会脱节。
   const batchTargets = useMemo(
-    () => units.filter((u) => statusMap[u.unit_id] !== "ready"),
-    [units, statusMap],
+    () =>
+      units.filter((u) => {
+        if (statusMap[u.unit_id] !== "ready") return true;
+        return tasksByUnit.get(u.unit_id)?.status === "failed";
+      }),
+    [units, statusMap, tasksByUnit],
   );
 
   /**
@@ -553,6 +853,8 @@ export function ReferenceVideoCanvas({
           // 旁白交付方式随请求走，与单元入口同一个选择：不带上它，整批会按服务端
           // 默认的「后期配音」准入，用户在画布上选的「使用当前 TTS」被静默丢弃。
           narration_delivery: narrationDelivery,
+          // 与时间线手动批量同源：走 Agnes 凭证 Key 池，按 key 数并发。
+          use_agnes_key_pool: true,
           ...(confirmedDurations ? { confirmed_request_durations: confirmedDurations } : {}),
         });
         setBatchAdmission(admission.decision === "admitted" ? null : admission);
@@ -573,13 +875,78 @@ export function ReferenceVideoCanvas({
     // 实时复核而非用渲染期快照：其它入口（单元按钮、Agent 入队、SSE 落库）可能已占用
     // 同一 unit。命中即跳过，不当作错误提示——批量入口的语义是「把还能生成的都排上」，
     // 逐个报错只会刷屏。
-    const targets = batchTargets.map((u) => u.unit_id).filter(canEnqueueBatchUnit);
-    if (targets.length === 0) {
+    const eligible = batchTargets.map((u) => u.unit_id).filter(canEnqueueBatchUnit);
+    if (eligible.length === 0) {
       useAppStore.getState().pushToast(t("reference_batch_nothing_to_do"), "info");
       return;
     }
-    await runBatch(targets);
+    const { taken, deferred } = takeReferenceBatchSlice(eligible);
+    if (deferred > 0) {
+      useAppStore.getState().pushToast(
+        t("reference_batch_capped", {
+          max: REFERENCE_VIDEO_BATCH_MAX,
+          taken: taken.length,
+          deferred,
+        }),
+        "info",
+      );
+    }
+    await runBatch(taken);
   }, [batchTargets, canEnqueueBatchUnit, runBatch, t]);
+
+  // 本集可取消的参考视频任务：排队中或运行中（cancelling 已在收尾，不再重复点）。
+  const batchCancelTargets = useMemo(() => {
+    const out: { unitId: string; taskId: string; status: "queued" | "running" }[] = [];
+    for (const u of units) {
+      const row = tasksByUnit.get(u.unit_id);
+      if (!row) continue;
+      if (row.status === "queued" || row.status === "running") {
+        out.push({ unitId: u.unit_id, taskId: row.task_id, status: row.status });
+      }
+    }
+    return out;
+  }, [units, tasksByUnit]);
+
+  const [batchCancelling, setBatchCancelling] = useState(false);
+
+  const handleBatchCancel = useCallback(async () => {
+    const targets = batchCancelTargets;
+    if (targets.length === 0) {
+      useAppStore.getState().pushToast(t("reference_batch_cancel_nothing"), "info");
+      return;
+    }
+    const runningCount = targets.filter((x) => x.status === "running").length;
+    const confirmed = window.confirm(
+      runningCount > 0
+        ? t("reference_batch_cancel_confirm_with_running", {
+            count: targets.length,
+            running: runningCount,
+          })
+        : t("reference_batch_cancel_confirm", { count: targets.length }),
+    );
+    if (!confirmed) return;
+
+    setBatchCancelling(true);
+    try {
+      const results = await Promise.allSettled(targets.map((x) => API.cancelTask(x.taskId)));
+      const cancelled = results.filter((r) => r.status === "fulfilled").length;
+      const failed = results.length - cancelled;
+      if (cancelled > 0) {
+        useAppStore
+          .getState()
+          .pushToast(t("reference_batch_cancel_done", { count: cancelled }), "success");
+      }
+      if (failed > 0) {
+        useAppStore
+          .getState()
+          .pushToast(t("reference_batch_cancel_partial_failed", { count: failed }), "error");
+      }
+    } catch (e) {
+      toastError(e, (msg) => t("reference_batch_cancel_failed", { error: msg }));
+    } finally {
+      setBatchCancelling(false);
+    }
+  }, [batchCancelTargets, t]);
 
   /**
    * 聚合确认后重发同一端点完成入队：档位按 tier 摊回各 unit，目标集合仍是本轮全部
@@ -600,20 +967,31 @@ export function ReferenceVideoCanvas({
       if (tier.request_duration_seconds == null) continue;
       for (const unitId of tier.unit_ids) durationByUnit.set(unitId, tier.request_duration_seconds);
     }
-    const targets = Array.from(
+    const eligible = Array.from(
       new Set([...admission.units.map((u) => u.unit_id), ...durationByUnit.keys()]),
     ).filter(canEnqueueBatchUnit);
-    if (targets.length === 0) {
+    if (eligible.length === 0) {
       // 弹窗此刻已关闭，不给反馈的话界面只是静静地什么也没发生。
       useAppStore.getState().pushToast(t("reference_batch_nothing_to_do"), "info");
       return;
     }
+    const { taken, deferred } = takeReferenceBatchSlice(eligible);
+    if (deferred > 0) {
+      useAppStore.getState().pushToast(
+        t("reference_batch_capped", {
+          max: REFERENCE_VIDEO_BATCH_MAX,
+          taken: taken.length,
+          deferred,
+        }),
+        "info",
+      );
+    }
     const confirmed: Record<string, number> = {};
-    for (const unitId of targets) {
+    for (const unitId of taken) {
       const duration = durationByUnit.get(unitId);
       if (duration != null) confirmed[unitId] = duration;
     }
-    void runBatch(targets, confirmed);
+    void runBatch(taken, confirmed);
   }, [batchAdmission, canEnqueueBatchUnit, runBatch, t]);
 
   const onAdd = useCallback(() => void handleAdd(), [handleAdd]);
@@ -886,6 +1264,14 @@ export function ReferenceVideoCanvas({
         units={units}
         onSaveTitle={onSaveTitle}
         canEditTitle={canEditTitle}
+        onComposePreview={handleComposePreview}
+        onUpscalePreview={handleUpscalePreview}
+        onWatchPreview={handleWatchEpisodePreview}
+        onWatchUpscaled={handleWatchUpscaledPreview}
+        episodePreviewUrl={episodePreviewUrl}
+        episodeUpscaledUrl={episodeUpscaledUrl}
+        episodePreviewSubtitlesWebvtt={episodePreviewSubtitlesWebvtt}
+        episodePreviewSubtitles={episodePreviewSubtitles}
       />
 
       {/* Tabs + request-local generation controls */}
@@ -942,6 +1328,25 @@ export function ReferenceVideoCanvas({
               onChange={setNarrationDelivery}
               compact
             />
+            {narrationDelivery === "use_tts" && (
+              <>
+                <IndexTtsServiceControls compact />
+                <button
+                  type="button"
+                  onClick={() => void handleFillNarration()}
+                  disabled={fillingNarration || narrationFillTargets.length === 0}
+                  title={t("batch_fill_narration_hint")}
+                  className="focus-ring inline-flex items-center gap-1.5 rounded-md border border-[var(--color-hairline)] bg-[oklch(0.22_0.011_265_/_0.5)] px-2.5 py-1 text-[11.5px] text-[var(--color-text-2)] transition-colors hover:bg-[oklch(0.26_0.013_265_/_0.7)] hover:text-[var(--color-text)] disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  {fillingNarration ? (
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
+                  ) : (
+                    <Sparkles className="h-3.5 w-3.5" aria-hidden="true" />
+                  )}
+                  <span>{fillingNarration ? t("submitting") : t("batch_fill_narration")}</span>
+                </button>
+              </>
+            )}
             <button
               type="button"
               onClick={() => void handleBatchGenerate()}
@@ -950,6 +1355,25 @@ export function ReferenceVideoCanvas({
             >
               <Sparkles className="h-3.5 w-3.5" aria-hidden="true" />
               <span>{t("reference_batch_generate")}</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => void handleBatchCancel()}
+              disabled={batchCancelTargets.length === 0 || batchCancelling}
+              title={t("reference_batch_cancel_hint")}
+              aria-label={t("reference_batch_cancel")}
+              className="focus-ring inline-flex items-center gap-1.5 rounded-md border border-[var(--color-hairline)] bg-[oklch(0.22_0.011_265_/_0.5)] px-2.5 py-1 text-[11.5px] text-[var(--color-text-2)] transition-colors hover:bg-[oklch(0.30_0.10_25_/_0.18)] hover:text-[oklch(0.72_0.18_25)] disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              {batchCancelling ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
+              ) : (
+                <Ban className="h-3.5 w-3.5" aria-hidden="true" />
+              )}
+              <span>
+                {batchCancelling
+                  ? t("cancelling")
+                  : t("reference_batch_cancel")}
+              </span>
             </button>
           </>
         )}
@@ -1309,6 +1733,11 @@ export function ReferenceVideoCanvas({
                           generationBlocked={Boolean(selected.needs_replan)}
                           onUploadVideo={handleUploadVideo}
                           uploadingVideo={uploading.ids.has(selected.unit_id)}
+                          onUpscaleVideo={handleUpscaleVideo}
+                          upscalingVideo={upscaling.ids.has(selected.unit_id)}
+                          upscalePercent={
+                            upscaling.ids.has(selected.unit_id) ? upscaleProgress?.percent : null
+                          }
                           restoring={restoring.ids.has(selected.unit_id)}
                           onRestoringChange={handleRestoringChange}
                           checkBusy={isUnitLocked}
@@ -1345,6 +1774,13 @@ export function ReferenceVideoCanvas({
                   generationBlocked={Boolean(selected?.needs_replan)}
                   onUploadVideo={handleUploadVideo}
                   uploadingVideo={selected ? uploading.ids.has(selected.unit_id) : false}
+                  onUpscaleVideo={handleUpscaleVideo}
+                  upscalingVideo={selected ? upscaling.ids.has(selected.unit_id) : false}
+                  upscalePercent={
+                    selected && upscaling.ids.has(selected.unit_id)
+                      ? upscaleProgress?.percent
+                      : null
+                  }
                   restoring={selected ? restoring.ids.has(selected.unit_id) : false}
                   onRestoringChange={handleRestoringChange}
                   checkBusy={isUnitLocked}

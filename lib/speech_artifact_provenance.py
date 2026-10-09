@@ -25,12 +25,58 @@ _DEFAULT_SUBTITLE_TIMING_POLICY: Mapping[str, object] = {
     "kind": "mechanical-text-length",
     "version": 1,
 }
+# use_tts 成片默认：叠 TTS 时静音视频原声，只播 IndexTTS。
+# 旁白镜的供应商成片常已自带口播；若原声满增益再叠 TTS 会出现两重旁白。
+# 无 TTS 的对白镜仍用满增益原声。
 _DEFAULT_PRESENTATION_MIX_POLICY: Mapping[str, object] = {
     "kind": "provider-original-plus-optional-tts",
-    "version": 1,
+    "version": 2,
     "provider_video_gain": 1.0,
-    "narration_audio_gain": 1.0,
+    "provider_video_gain_under_tts": 0.0,
+    "narration_audio_gain": 0.7,
 }
+
+
+def resolve_presentation_track_gains(
+    *,
+    provider_audio_enabled: bool,
+    has_narration_audio: bool,
+    mix_policy: Mapping[str, object] = _DEFAULT_PRESENTATION_MIX_POLICY,
+) -> tuple[float, float | None]:
+    """Return ``(video_gain, narration_gain)`` for one presentation mix.
+
+    ``narration_gain`` is ``None`` when the presentation has no TTS track.
+    """
+
+    if not isinstance(provider_audio_enabled, bool):
+        raise TypeError("provider_audio_enabled must be a boolean")
+    if not isinstance(has_narration_audio, bool):
+        raise TypeError("has_narration_audio must be a boolean")
+    if not isinstance(mix_policy, Mapping):
+        raise TypeError("mix_policy must be a mapping")
+
+    provider_gain = _mix_policy_gain(mix_policy, "provider_video_gain")
+    under_tts_gain = _mix_policy_gain(mix_policy, "provider_video_gain_under_tts", default=provider_gain)
+    narration_gain = _mix_policy_gain(mix_policy, "narration_audio_gain")
+
+    if not provider_audio_enabled:
+        video_gain = 0.0
+    elif has_narration_audio:
+        video_gain = under_tts_gain
+    else:
+        video_gain = provider_gain
+
+    return video_gain, (narration_gain if has_narration_audio else None)
+
+
+def _mix_policy_gain(mix_policy: Mapping[str, object], key: str, *, default: float | None = None) -> float:
+    raw = mix_policy.get(key, default)
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        raise ValueError(f"mix_policy.{key} must be a finite gain in [0, 1]")
+    gain = float(raw)
+    if not math.isfinite(gain) or gain < 0.0 or gain > 1.0:
+        raise ValueError(f"mix_policy.{key} must be a finite gain in [0, 1]")
+    return gain
 
 
 @dataclass(frozen=True, slots=True)

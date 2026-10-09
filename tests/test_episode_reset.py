@@ -368,7 +368,8 @@ def test_consumed_detected_from_disk_when_ledger_status_missing(tmp_path: Path) 
     assert result.consumed_episodes == [1]
 
 
-def test_confirmed_reset_keeps_downstream_products(tmp_path: Path) -> None:
+def test_confirmed_reset_deletes_scripts_keeps_drafts(tmp_path: Path) -> None:
+    """确认后重置：范围内剧本删除，step1 草稿保留，账本清空。"""
     project_dir = _write_project(
         tmp_path,
         episodes=[
@@ -385,11 +386,42 @@ def test_confirmed_reset_keeps_downstream_products(tmp_path: Path) -> None:
 
     assert isinstance(result, EpisodeResetResult)
     assert result.consumed_episodes == [1]
-    assert script.is_file()
+    assert not script.exists()
+    assert "scripts/episode_1.json" in result.deleted_files
     assert step1.is_file()
     project = _load_project(project_dir)
     assert project["episodes"] == []
     assert project["planning_cursor"] is None
+
+
+def test_reset_then_leftover_script_cannot_reseed_ledger_without_source_range(tmp_path: Path) -> None:
+    """回归：重置清空账本后，残留剧本不得被监视同步成无 source_range 的集条目。"""
+    from server.services.project_events import ProjectEventService
+
+    project_dir = _write_project(
+        tmp_path,
+        episodes=[
+            _entry(1, source_range={"source_file": "source/novel.txt", "start": 0, "end": 10}, status="consumed"),
+        ],
+        planning_cursor={"source_file": "source/novel.txt", "offset": 10},
+    )
+    _write_script(project_dir, 1)
+
+    result = reset_episode_planning(project_dir, from_episode=1, confirm_consumed=True)
+    assert isinstance(result, EpisodeResetResult)
+    assert _load_project(project_dir)["episodes"] == []
+    assert not (project_dir / "scripts" / "episode_1.json").exists()
+
+    # 模拟监视漏网或外部又丢回一份残留剧本
+    leftover = project_dir / "scripts" / "episode_1.json"
+    leftover.parent.mkdir(exist_ok=True)
+    leftover.write_text(
+        json.dumps({"episode": 1, "title": "残留", "content_mode": "narration", "segments": []}),
+        encoding="utf-8",
+    )
+    ProjectEventService(projects_root=tmp_path)._ensure_script_index_synced(project_dir.name)
+
+    assert _load_project(project_dir)["episodes"] == []
 
 
 # ---------------------------------------------------------------------------
@@ -1153,7 +1185,7 @@ def test_partial_reset_consumed_before_range_not_flagged(tmp_path: Path) -> None
     assert isinstance(result, EpisodeResetResult)
 
 
-def test_partial_reset_confirmed_keeps_downstream_products(tmp_path: Path) -> None:
+def test_partial_reset_confirmed_deletes_scripts_keeps_drafts(tmp_path: Path) -> None:
     project_dir = _write_project(
         tmp_path,
         episodes=[
@@ -1166,12 +1198,17 @@ def test_partial_reset_confirmed_keeps_downstream_products(tmp_path: Path) -> No
         ],
     )
     script = _write_script(project_dir, 2)
+    drafts = project_dir / "drafts" / "episode_2"
+    drafts.mkdir(parents=True)
+    step1 = drafts / "step1_segments.json"
+    step1.write_text("{}", encoding="utf-8")
 
     result = reset_episode_planning(project_dir, from_episode=2, confirm_consumed=True)
 
     assert isinstance(result, EpisodeResetResult)
     assert result.consumed_episodes == [2]
-    assert script.is_file()
+    assert not script.exists()
+    assert step1.is_file()
     project = _load_project(project_dir)
     assert [e["episode"] for e in project["episodes"]] == [1]
 
@@ -1235,7 +1272,13 @@ def test_partial_reset_removes_all_unbound_episode_claims_and_preserves_retained
     entries = adapter.snapshot_entries()
     assert retained_key in entries
     assert not set(removed) & set(entries)
-    assert all((project_dir / relative_path).is_file() for relative_path in removed.values())
+    # 重置范围内剧本删除；其余已解绑媒体 / 草稿文件仍保留在磁盘
+    assert not (project_dir / "scripts" / "episode_2.json").exists()
+    assert (project_dir / "scripts" / "episode_1.json").is_file()
+    for relative_path in removed.values():
+        if relative_path == "scripts/episode_2.json":
+            continue
+        assert (project_dir / relative_path).is_file()
 
 
 def test_manifest_failure_restores_reset_project_and_claims_exactly(

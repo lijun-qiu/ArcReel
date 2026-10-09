@@ -6014,7 +6014,9 @@ class TestBuildPrompt:
         assert "画风：" not in out
         assert out.startswith("Style: 真人电视剧风格")
         assert "\n\n村口黄昏的长镜头\n\n" in out
-        assert out.endswith("画面避免：水印、多余文字、Logo。")
+        from lib.prompt_builders import append_image_negative_tail
+
+        assert out.endswith(append_image_negative_tail("").strip())
 
 
 # ---------------------------------------------------------------------------
@@ -6023,11 +6025,12 @@ class TestBuildPrompt:
 
 
 def _fake_planner_cls(result: Any, captured: dict[str, Any] | None = None):
-    """构造可注入的 EpisodePlanner 替身：create() 工厂 + plan() 返回预置结果。"""
+    """构造可注入的 EpisodePlanner 替身：create() 工厂 + plan() / plan_by_markers()。"""
 
     class _FakePlanner:
-        def __init__(self) -> None:
-            pass
+        def __init__(self, project_path=None, generator=None, **_kwargs) -> None:
+            if captured is not None and project_path is not None:
+                captured["project_path"] = project_path
 
         @classmethod
         async def create(cls, project_path):
@@ -6038,6 +6041,14 @@ def _fake_planner_cls(result: Any, captured: dict[str, Any] | None = None):
         async def plan(self, instructions=None):
             if captured is not None:
                 captured["plan_instructions"] = instructions
+                captured["plan_path"] = "llm"
+            if isinstance(result, BaseException):
+                raise result
+            return result
+
+        def plan_by_markers(self):
+            if captured is not None:
+                captured["plan_path"] = "markers"
             if isinstance(result, BaseException):
                 raise result
             return result
@@ -6071,6 +6082,34 @@ async def test_plan_episodes_happy(fake_ctx: ToolContext, monkeypatch) -> None:
     assert "城门遇袭" in text
     assert captured["project_path"] == fake_ctx.project_path
     assert captured["plan_instructions"] is None  # 不传时透传 None
+    assert captured["plan_path"] == "llm"
+
+
+@pytest.mark.unit
+async def test_plan_episodes_uses_markers_path_when_mode_set(fake_ctx: ToolContext, monkeypatch) -> None:
+    """项目 planning_split_mode=markers 时走规则切，不调用文本模型路径。"""
+    from lib.episode_planner import EpisodePlanSummary, PlanResult
+    from server.agent_runtime.sdk_tools import episode_planning as mod
+
+    fake_ctx.pm.project_payload["planning_split_mode"] = "markers"  # type: ignore[attr-defined]
+    captured: dict[str, Any] = {}
+    result = PlanResult(
+        episodes=[
+            EpisodePlanSummary(episode=1, title="第1集", hook="钩子", reading_units=50, ledger_status="planned")
+        ],
+        cursor=None,
+        source_exhausted=True,
+        total_planned=1,
+    )
+    monkeypatch.setattr(mod, "EpisodePlanner", _fake_planner_cls(result, captured))
+    out = await _call(mod.plan_episodes_tool(fake_ctx), {"instructions": "应被忽略"})
+
+    assert out.get("is_error") is not True
+    text = out["content"][0]["text"]
+    assert "按标记切分" in text and "未调用文本模型" in text
+    assert "plan_instructions" not in captured
+    assert captured["plan_path"] == "markers"
+    assert captured["project_path"] == fake_ctx.project_path
 
 
 @pytest.mark.unit
@@ -7345,7 +7384,7 @@ async def test_validate_and_promote_draft_promotes_after_repair(fake_ctx: ToolCo
 
 @pytest.mark.unit
 async def test_validate_and_promote_draft_reports_again_without_round_limit(fake_ctx: ToolContext, monkeypatch) -> None:
-    """再违约则再返回刷新后的报告、草稿留在原地，可反复晋升——无收敛轮次上限。"""
+    """再违约则再返回刷新后的报告、草稿留在原地；同一草稿最多晋升 5 次。"""
     _rv_source(fake_ctx)
     await _run_rv_split(fake_ctx, monkeypatch, [_rv_unit("@[不存在的人] 出场")])
 

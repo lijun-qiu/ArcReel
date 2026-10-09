@@ -21,10 +21,27 @@ class _FakeQueue:
 
     def __init__(self):
         self.calls = []
+        self.active_tasks: list[dict] = []
 
     async def enqueue_task(self, **kwargs):
         self.calls.append(kwargs)
         return {"task_id": f"task-{len(self.calls)}", "deduped": False}
+
+    async def get_active_tasks_for_resources(
+        self,
+        *,
+        project_name: str,
+        task_type: str,
+        resource_ids: list[str],
+        script_file: str | None = None,
+        resource_type: str | None = None,
+    ):
+        wanted = set(resource_ids)
+        return [
+            task
+            for task in self.active_tasks
+            if task.get("resource_id") in wanted and task.get("task_type", task_type) == task_type
+        ]
 
 
 class _FakePM:
@@ -296,6 +313,71 @@ class TestGenerateRouter:
             assert call["media_type"] == "image"
             assert call["resource_id"] == "E1S02"
             assert call["source"] == "webui"
+            # 上一镜无活动任务时不挂依赖，可立即跑（沿用已有成图作参考）
+            assert call.get("dependency_task_id") is None
+            assert call["dependency_group"]
+
+    @pytest.mark.unit
+    def test_storyboard_enqueue_waits_for_active_previous(self, tmp_path, monkeypatch):
+        project_path = _prepare_files(tmp_path)
+        fake_pm = _FakePM(project_path)
+        fake_pm.script["segments"][1]["use_previous_storyboard"] = True
+        fake_queue = _FakeQueue()
+        fake_queue.active_tasks = [
+            {
+                "task_id": "prev-task",
+                "task_type": "storyboard",
+                "resource_id": "E1S01",
+                "status": "running",
+            }
+        ]
+        client = _client(monkeypatch, fake_pm, fake_queue)
+
+        with client:
+            sb = client.post(
+                "/api/v1/projects/demo/generate/storyboard/E1S02",
+                json={
+                    "script_file": "episode_1.json",
+                    "prompt": {
+                        "scene": "雨夜",
+                        "composition": {"shot_type": "Medium Shot", "lighting": "暖光", "ambiance": "薄雾"},
+                    },
+                },
+            )
+            assert sb.status_code == 200
+            call = fake_queue.calls[0]
+            assert call["dependency_task_id"] == "prev-task"
+
+    @pytest.mark.unit
+    def test_storyboard_enqueue_skips_dependency_when_previous_disabled(self, tmp_path, monkeypatch):
+        project_path = _prepare_files(tmp_path)
+        fake_pm = _FakePM(project_path)
+        fake_pm.script["segments"][1]["use_previous_storyboard"] = False
+        fake_queue = _FakeQueue()
+        fake_queue.active_tasks = [
+            {
+                "task_id": "prev-task",
+                "task_type": "storyboard",
+                "resource_id": "E1S01",
+                "status": "running",
+            }
+        ]
+        client = _client(monkeypatch, fake_pm, fake_queue)
+
+        with client:
+            sb = client.post(
+                "/api/v1/projects/demo/generate/storyboard/E1S02",
+                json={
+                    "script_file": "episode_1.json",
+                    "prompt": {
+                        "scene": "雨夜",
+                        "composition": {"shot_type": "Medium Shot", "lighting": "暖光", "ambiance": "薄雾"},
+                    },
+                },
+            )
+            assert sb.status_code == 200
+            call = fake_queue.calls[0]
+            assert call.get("dependency_task_id") is None
 
     @pytest.mark.unit
     def test_video_enqueue_success(self, tmp_path, monkeypatch):
@@ -326,6 +408,32 @@ class TestGenerateRouter:
             assert call["task_type"] == "video"
             assert call["media_type"] == "video"
             assert call["payload"]["duration_seconds"] == 5
+            assert "use_agnes_key_pool" not in call["payload"]
+
+    @pytest.mark.unit
+    def test_video_enqueue_agnes_key_pool_flag(self, tmp_path, monkeypatch):
+        project_path = _prepare_files(tmp_path)
+        fake_pm = _FakePM(project_path)
+        fake_queue = _FakeQueue()
+        client = _client(monkeypatch, fake_pm, fake_queue)
+
+        with client:
+            video = client.post(
+                "/api/v1/projects/demo/generate/video/E1S01",
+                json={
+                    "script_file": "episode_1.json",
+                    "duration_seconds": 5,
+                    "use_agnes_key_pool": True,
+                    "prompt": {
+                        "action": "奔跑",
+                        "camera_motion": "Static",
+                        "ambiance_audio": "雨声",
+                    },
+                },
+            )
+            assert video.status_code == 200
+            call = fake_queue.calls[0]
+            assert call["payload"]["use_agnes_key_pool"] is True
 
     @pytest.mark.integration
     def test_video_use_tts_requires_fresh_audio_without_enqueuing_tts(self, tmp_path, monkeypatch):

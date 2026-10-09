@@ -185,6 +185,32 @@ describe("PresentationPlayer", () => {
     await waitFor(() => expect(API.getPresentation).toHaveBeenCalledTimes(2));
   });
 
+  it("applies independent mix gains for provider audio and TTS", async () => {
+    vi.mocked(API.getPresentation).mockResolvedValue({
+      ...tts,
+      video: { ...tts.video, gain: 0.6 },
+      narration_audio: tts.narration_audio ? { ...tts.narration_audio, gain: 0.4 } : null,
+    });
+    render(
+      <PresentationPlayer
+        projectName="demo"
+        resourceType="videos"
+        resourceId="E1S01"
+        initialVariant="use_tts"
+      />,
+    );
+
+    const video = await screen.findByLabelText("E1S01 成片预览");
+    const audio = await screen.findByLabelText("E1S01 TTS 音轨");
+    expect(video).toHaveProperty("muted", false);
+    expect(video).toHaveProperty("volume", 0.6);
+    expect(audio).toHaveProperty("volume", 0.4);
+
+    Object.defineProperty(video, "volume", { configurable: true, writable: true, value: 0.3 });
+    fireEvent.volumeChange(video);
+    expect(audio).toHaveProperty("volume", 0.2);
+  });
+
   it("keeps TTS at unity when the provider track is explicitly disabled", async () => {
     vi.mocked(API.getPresentation).mockResolvedValue({
       ...tts,

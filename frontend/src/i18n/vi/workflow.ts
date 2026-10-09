@@ -125,6 +125,7 @@ export default {
   'action_repair_project_data': 'nhờ tác nhân AI sửa tệp dự án bị hỏng',
   'action_collect_project_input': 'bổ sung văn bản gốc và thiết lập dự án',
   'action_analyze_assets': 'phân tích nhân vật, bối cảnh và đạo cụ từ văn bản gốc',
+  'action_propose_character_looks': 'xem lại và đăng ký tạo hình / bối cảnh / đạo cụ cho tập này',
   'action_reset_episode_planning': 'đặt lại kế hoạch tập để bao gồm văn bản mới',
   'action_plan_episodes': 'lập kế hoạch các tập',
   'action_draft_selling_points': 'soạn các điểm bán hàng',

@@ -1761,9 +1761,10 @@ class TestReferencePayloadLimits:
 
 
 class TestTextBackendTierResolution:
-    """文本档位五级解析链：项目档位 > 项目默认 > 全局档位 > 全局默认 > 自动推断。"""
+    """文本档位解析链：项目档位 > 项目默认 > 全局档位 > 全局默认 > 档位硬编码 > 自动推断。"""
 
-    _AUTO = ("gemini-aistudio", "gemini-3-flash-preview")  # ready gemini 的 registry 默认 text model
+    _CODE_COMPLEX = ("modelscope", "deepseek-ai/DeepSeek-V4-Pro")
+    _CODE_SIMPLE = ("modelscope", "deepseek-ai/DeepSeek-V4-Flash-0731")
 
     @pytest.mark.unit
     @pytest.mark.parametrize("p_tier", [False, True])
@@ -1795,7 +1796,7 @@ class TestTextBackendTierResolution:
         elif g_def:
             expected = ("g-def", "m")
         else:
-            expected = self._AUTO
+            expected = self._CODE_COMPLEX
 
         resolver = ConfigResolver.__new__(ConfigResolver)
         fake_svc = _FakeConfigService(settings=settings)
@@ -1803,6 +1804,22 @@ class TestTextBackendTierResolution:
             mock_pm.return_value.load_project.return_value = project
             result = await resolver._resolve_text_backend(fake_svc, MagicMock(), TextTaskType.SCRIPT, "demo")
         assert result == expected
+
+    @pytest.mark.unit
+    async def test_empty_settings_use_modelscope_tier_code_defaults(self):
+        """全局桶与默认均空：简单 Flash、复杂 Pro。"""
+        from unittest.mock import MagicMock
+
+        from lib.text_backends.base import TextTaskType
+
+        resolver = ConfigResolver.__new__(ConfigResolver)
+        fake_svc = _FakeConfigService(settings={})
+        assert await resolver._resolve_text_backend(
+            fake_svc, MagicMock(), TextTaskType.SCRIPT, None
+        ) == self._CODE_COMPLEX
+        assert await resolver._resolve_text_backend(
+            fake_svc, MagicMock(), TextTaskType.OVERVIEW, None
+        ) == self._CODE_SIMPLE
 
     @pytest.mark.unit
     async def test_no_project_name_skips_project_levels(self):

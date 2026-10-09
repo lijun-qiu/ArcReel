@@ -19,6 +19,7 @@ import {
 } from "@/components/shared/LayeredModelFields";
 import { TextTierFields } from "@/components/shared/TextTierFields";
 import { VideoModelSpecBar, videoOptionMetaRenderer } from "@/components/shared/VideoModelSpecBar";
+import { IndexTtsServiceControls } from "@/components/shared/IndexTtsServiceControls";
 import { InlineWarning } from "@/components/ui/InlineWarning";
 import { PROVIDER_NAMES } from "@/components/ui/ProviderIcon";
 import { useAppStore } from "@/stores/app-store";
@@ -417,6 +418,8 @@ export function MediaModelSection() {
         ) : (
           emptyHint(t("no_audio_providers_hint"))
         )}
+
+        <IndexTtsServiceControls />
 
         <div className="mt-4 space-y-3.5">
           <div>

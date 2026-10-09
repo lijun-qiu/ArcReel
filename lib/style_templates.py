@@ -9,7 +9,7 @@ lib.prompt_utils.normalize_style 在注入前兜底清理）。
 
 from __future__ import annotations
 
-# 完整 36 条，顺序即 UI 展示顺序
+# 完整 39 条，顺序即 UI 展示顺序
 STYLE_TEMPLATES: dict[str, dict] = {
     # ===== 真人 AI 漫剧 (18) =====
     "live_cinematic_ancient": {"category": "live", "prompt": "精品古装真人短剧风格，专业打光，高质量电视剧质感"},
@@ -60,9 +60,31 @@ STYLE_TEMPLATES: dict[str, dict] = {
     "live_wong": {"category": "live", "prompt": "王家卫风格，慵懒暧昧的氛围，颗粒感胶片，东方都市孤独美学"},
     "live_shaw": {"category": "live", "prompt": "参考港式武侠电视剧风格，邵氏电影风格，电影感"},
     "live_cyberpunk": {"category": "live", "prompt": "参考真人赛博朋克电影，电影质感，极致高清画质"},
-    # ===== 动画 AI 漫剧 (18) =====
+    # ===== 动画 AI 漫剧 (21) =====
     "anim_3d_cg": {"category": "anim", "prompt": "3D、游戏CG，影视级、虚幻引擎渲染"},
     "anim_cn_3d": {"category": "anim", "prompt": "国风3D、影视级、虚幻引擎渲染"},
+    "anim_cn_short_drama": {
+        "category": "anim",
+        "prompt": (
+            "半写实三维国漫短剧风格，AI漫剧质感，人物精致偶像感、大眼细肤、柔和发丝光泽，"
+            "暖色自然柔光与浅景深，细腻皮肤与服装材质，都市日常言情氛围，"
+            "16:9横屏构图，拒绝硬描边赛璐璐与真人仿真，极致高清画质"
+        ),
+    },
+    "anim_cn_2d_drama": {
+        "category": "anim",
+        "prompt": "国漫2D短剧风格，清晰黑色描边，赛璐璐平涂上色，硬边色块阴影，表情夸张生动，日常都市生活场景，竖屏短视频质感，2d动画",
+    },
+    "anim_cn_idol_manhua": {
+        "category": "anim",
+        "prompt": (
+            "都市国漫二次元偶像插画短剧风格，2D数字绘画非写实非3D，"
+            "角色脸型偏窄长尖下巴V脸、大眼精致五官，发型蓬松分层、中分或侧分刘海贴脸，"
+            "花美男偶像感，气质清爽时尚，柔和明亮干净商业光，浅景深，"
+            "服饰偏青年休闲西装外套与浅色内搭，莫兰迪中性色，"
+            "拒绝真人仿真人、拒绝游戏CG虚幻引擎、拒绝当代主流写实路人脸与平头短发"
+        ),
+    },
     "anim_kyoto": {
         "category": "anim",
         "prompt": "商业动画画风，柔和光影效果，轻柔的赛璐珞上色，柔和的漫射光线，清晰干净的细轮廓线条，参考京都动画作品，参考石立太一动画作品，2d动画",

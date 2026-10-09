@@ -114,7 +114,7 @@ mcp__arcreel__validate_and_promote_draft({"episode": N})
 ```
 
 全量校验通过则写回正式 `step1_normalized_script.json`、隔离草稿自动清除；不通过则返回逐条报告，
-按报告继续改草稿再晋升，无轮次上限。若返回并发冲突（取回后正式文件被 Web 端保存改过），按报告
+按报告继续改草稿再晋升，同一草稿最多 5 次，达到上限后停止并把剩余违约回报用户。若返回并发冲突（取回后正式文件被 Web 端保存改过），按报告
 把对方的修改合并进草稿、把 `meta.base_fingerprint` 更新为报告给出的现值指纹，再晋升。
 隔离草稿在场期间审阅门与 step2 生成都被阻塞，处置完才能继续。
 
@@ -192,6 +192,6 @@ mcp__arcreel__validate_and_promote_draft({"episode": N})
 
 - 场景 ID 格式：E{集数}S{两位序号}；如需拆分同一主场景，用 E{集数}S{两位序号}_{子序号}（如 `E3S05_1`），与共享模型 `scene_id` 接受的形态一致（集数 = 当前 episode，由调用工具时的 `episode` 参数决定）
 - 每个场景宜为一个独立的视觉画面，可在指定时长内完成
-- 时长决策序（高到低）：硬约束（取值必须在 Step 0 查得的 `supported_durations` 内，不超过 `max_duration`）> `default_duration` 偏好（非 null 时优先贴近）> 按内容取值（复杂画面如打斗 / 大场面 / 情绪铺陈可取更长值）
+- 时长决策序（高到低）：硬约束（取值必须在 Step 0 查得的 `supported_durations` 内，不超过 `max_duration`）> 台词口播下界 > `default_duration` 偏好（非 null 时优先取该档）> 按内容取**最短够用档**（仅打斗 / 大场面 / 情绪铺陈等确实需要时再取更长；不要默认贴近最长档、不要为填满时长而拉长）
 - segment_break 标记真正的镜头切换点（场景、时间、地点的重大变化）
 - 口播逐字落 `utterances`（dialogue 带 speaker、voiceover 无 speaker）、原文逐字落 `source_text`；`novel` 画外音由语境判断、`screenplay` 逐字保留，泛指群演不进 characters_in_scene

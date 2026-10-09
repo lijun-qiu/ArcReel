@@ -86,10 +86,10 @@ MESSAGES = {
     "val_duration_invalid": "{prefix}: duration_seconds không hợp lệ '{value}', phải là số nguyên dương",
     # ---- utterances của drama ----
     "val_utterance_must_be_object": "{prefix} phải là đối tượng",
-    "val_utterance_kind_invalid": "{prefix} kind phải là dialogue hoặc voiceover",
+    "val_utterance_kind_invalid": "{prefix} kind phải là dialogue, inner_monologue hoặc voiceover",
     "val_utterance_text_invalid": "{prefix} text phải là chuỗi không rỗng",
     "val_utterance_speaker_type": "{prefix} speaker phải là chuỗi hoặc null",
-    "val_utterance_dialogue_speaker": "{prefix} dialogue phải có speaker không rỗng",
+    "val_utterance_dialogue_speaker": "{prefix} dialogue / inner_monologue phải có speaker không rỗng",
     "val_utterance_voiceover_speaker": "{prefix} voiceover không được có speaker",
     "val_scene_speech_overflow": (
         "{prefix}: thời lượng thoại ước tính {spoken:.1f} giây vượt thời lượng cảnh {duration} giây quá "

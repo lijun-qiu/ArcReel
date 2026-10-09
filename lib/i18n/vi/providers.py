@@ -28,9 +28,10 @@ MESSAGES: dict[str, str] = {
     "provider_desc_kling": "Nền tảng tạo video và ảnh Kling của Kuaishou. Xác thực bằng API Key áp dụng cho mọi model; Access Key + Secret Key (JWT) chỉ áp dụng cho model từ 3.0 trở về trước. Chọn một trong hai — nếu điền cả hai, API Key được ưu tiên.",
     "provider_desc_agnes": "Nền tảng đa phương thức Agnes (phong cách OpenAI), xác thực bằng Bearer API key; hiện hỗ trợ tạo ảnh, văn bản và video.",
     "provider_desc_openrouter": "OpenRouter mô hình văn bản miễn phí qua proxy injector cục bộ (127.0.0.1:9999); khóa client là openrouter_proxy_injector_api_key.",
-    "provider_desc_modelscope": "ModelScope API-Inference văn bản miễn phí qua proxy injector cục bộ (127.0.0.1:10001); khóa client là modelscope_proxy_api_key.",
+    "provider_desc_modelscope": "ModelScope API-Inference văn bản miễn phí (DeepSeek / Zhipu GLM) qua proxy injector cục bộ (127.0.0.1:10001); khóa client là modelscope_proxy_api_key. Đặt ms-* thật trong .env.modelscope của proxy.",
     # Agent preset notes (lib/agent_provider_catalog.py)
     "preset_notes_deepseek": "Endpoint Anthropic-compat chính thức của DeepSeek; cần API key sk-.",
+    "preset_notes_modelscope": "Agent ModelScope dùng proxy injector cục bộ (mặc định 127.0.0.1:10001). Khóa client: modelscope_proxy_api_key; ms-* thật nằm trong .env.modelscope của openrouter-proxy-injector.",
     "preset_notes_agnes": "Agnes Messages API tương thích Anthropic (apihub); dùng cùng Bearer/sk key với ảnh/video.",
     "preset_notes_xiaomi_mimo": "Xiaomi MiMo chỉ chấp nhận tên model đã biết; không có danh sách model công khai.",
     "preset_notes_ark_coding_plan": "Gói Volcengine Ark Coding Plan",

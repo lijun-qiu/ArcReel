@@ -14,11 +14,12 @@
   勿把多资产参考塞进 keyframes（那是插值通道，不是身份参考）。轮询可用
   ``/v1/videos/{task_id}``。
 - ``agnes-video-2.5`` / ``agnes-video-2.5-flash``：官方 Videos 兼容契约；必填 ``mode``
-  （``text`` / ``keyframe`` / ``reference``）；输出档 ``size=720P``；参考图走顶层
-  ``images``（data URI，上限 5），参考音频走顶层 ``audios``（data URI，上限 3），
-  二者任一非空即 ``mode=reference``（与首/尾帧互斥，与官网一致）。时长 2.5 为 4–10s，
-  Flash 为 4–12s。Flash 不支持参考视频。轮询走 ``/agnesapi?video_id=&model_name=``
-  （文档推荐）。
+  （``text`` / ``keyframe`` / ``reference``）；输出档 ``size`` 由 ``request.resolution``
+  映射（2.5：``720P`` / ``960P`` / ``2K``；Flash：仅 ``720P``；未设或无法识别时兜底
+  ``720P``）；参考图走顶层 ``images``（data URI，上限 5），参考音频走顶层 ``audios``
+  （data URI，上限 3），二者任一非空即 ``mode=reference``（与首/尾帧互斥，与官网一致）。
+  时长 2.5 为 4–10s，Flash 为 4–12s。Flash 不支持参考视频。轮询走
+  ``/agnesapi?video_id=&model_name=``（文档推荐）。
 """
 
 from __future__ import annotations
@@ -46,6 +47,11 @@ from lib.retry import (
     DOWNLOAD_MAX_ATTEMPTS,
     with_retry_async,
 )
+
+# 创建任务（非幂等 POST）：429/503 等瞬态失败每 1 分钟重试一次，直到创建成功。
+# AmbiguousSubmitError / 确定性 4xx 仍不重试（见 should_retry_submit）。
+_CREATE_MAX_ATTEMPTS: int | None = None
+_CREATE_BACKOFF_SECONDS = (60,)
 from lib.video_backends.base import (
     IMAGE_MIME_TYPES,
     ProviderJobIdPersistenceMixin,
@@ -88,7 +94,7 @@ _V20_MAX_DURATION_SECONDS = 10
 # 在无关定妆图之间变形，观感像倒退/乱跳。多主体参考请用 v2.5 ``mode=reference``。
 _V20_MAX_REFERENCE_IMAGES = 1
 
-# v2.5：seconds "4"–"10"；size 目前仅 720P；reference 图按计费文案「前 5 张免费」取 5 为编排上限。
+# v2.5：seconds "4"–"10"；size 档见 ``_v25_size``；reference 图按计费文案「前 5 张免费」取 5 为编排上限。
 # 参考音频：Flash 文档上限 3；2.5 沿用同一上限（官网 Flash 专属差异表列出 audios，2.5 未给更高值）。
 # 出处：https://www.agnes-ai.com/zh-Hans/docs/agnes-video-25-flash
 _V25_MIN_DURATION_SECONDS = 4
@@ -97,7 +103,16 @@ _V25_MAX_DURATION_SECONDS = 10
 _V25_FLASH_MAX_DURATION_SECONDS = 12
 _V25_MAX_REFERENCE_IMAGES = 5
 _V25_MAX_REFERENCE_AUDIO = 3
-_V25_SIZE = "720P"
+_V25_DEFAULT_SIZE = "720P"
+# 项目侧常用小写 ``720p`` / ``2k``；API 要求大写 ``720P`` / ``2K``。
+_V25_SIZE_BY_RESOLUTION = {
+    "720p": "720P",
+    "720P": "720P",
+    "960p": "960P",
+    "960P": "960P",
+    "2k": "2K",
+    "2K": "2K",
+}
 _V25_MODE_TEXT = "text"
 _V25_MODE_KEYFRAME = "keyframe"
 _V25_MODE_REFERENCE = "reference"
@@ -141,6 +156,21 @@ def _is_v25_flash(model: str) -> bool:
 
 def _v25_max_duration(model: str) -> int:
     return _V25_FLASH_MAX_DURATION_SECONDS if _is_v25_flash(model) else _V25_MAX_DURATION_SECONDS
+
+
+def _v25_size(model: str, resolution: str | None) -> str:
+    """把项目分辨率映射为 Agnes 2.5 / Flash 的 ``size`` 字符串。
+
+    Flash 官方仅接受 ``720P``（传其它值会 400），故一律回 ``720P``。
+    正式 2.5 接受 ``720P`` / ``960P`` / ``2K``；未设或无法识别时兜底 ``720P``。
+    ``480p`` 不属于 2.5 契约——请改用 ``agnes-video-v2.0`` 的 width/height 路径。
+    """
+    if _is_v25_flash(model):
+        return _V25_DEFAULT_SIZE
+    if not resolution:
+        return _V25_DEFAULT_SIZE
+    mapped = _V25_SIZE_BY_RESOLUTION.get(resolution.strip())
+    return mapped if mapped is not None else _V25_DEFAULT_SIZE
 
 
 # 失败终态集合：除文档化的 failed 外，纳入 error / cancelled / canceled，避免上游以非标准失败态
@@ -381,7 +411,7 @@ class AgnesVideoBackend(ProviderJobIdPersistenceMixin):
             format_kwargs_for_log(_safe_body_for_log(payload)),
         )
         async with httpx.AsyncClient(timeout=self._http_timeout) as client:
-            task_id = await self._create_task(client, payload)
+            task_id = await self._create_task(client, payload, arc_task_id=request.task_id)
             logger.info("Agnes 视频任务已创建: task_id=%s model=%s", task_id, self._model)
             await self._persist_provider_job_id(request, task_id, provider=PROVIDER_AGNES)
             return await self._poll_and_build(client, task_id, request, is_resume=False)
@@ -469,7 +499,7 @@ class AgnesVideoBackend(ProviderJobIdPersistenceMixin):
             "model": self._model,
             "prompt": request.prompt,
             "seconds": str(int(request.duration_seconds)),
-            "size": _V25_SIZE,
+            "size": _v25_size(self._model, request.resolution),
             "aspect_ratio": request.aspect_ratio or "16:9",
         }
         if request.seed is not None:
@@ -604,25 +634,64 @@ class AgnesVideoBackend(ProviderJobIdPersistenceMixin):
 
     # ── HTTP submit / poll / download ───────────────────────────────────
 
-    @with_retry_async(
-        max_attempts=DEFAULT_MAX_ATTEMPTS,
-        backoff_seconds=DEFAULT_BACKOFF_SECONDS,
-        retry_if=should_retry_submit,
-    )
-    async def _create_task(self, client: httpx.AsyncClient, payload: dict) -> str:
+    async def _create_task(
+        self,
+        client: httpx.AsyncClient,
+        payload: dict,
+        *,
+        arc_task_id: str | None = None,
+    ) -> str:
         # 非幂等的「建任务 + 计费」POST：submit_post 把歧义传输错误转 AmbiguousSubmitError 终态失败，
         # 避免重试重复建任务 + 重复计费；>=400 抛 HTTPStatusError 交 should_retry_submit 按状态码分流
-        # （5xx/408/429 重试——含上游繁忙 503；确定性 4xx 快失败）。submit 用长超时覆盖上游长阻塞。
-        resp = await submit_post(
-            lambda: client.post(
-                f"{self._base_url}{_VIDEOS_ENDPOINT}",
-                json=payload,
-                headers=agnes_headers(self._api_key),
-                timeout=_SUBMIT_TIMEOUT_SECONDS,
-            ),
-            provider=PROVIDER_AGNES,
+        # （5xx/408/429 重试——含上游繁忙 503；确定性 4xx 快失败）。
+        # 创建侧对可重试错误每 60s 持续重试直至成功（或任务取消）；重试前写回「排队重试中」。
+        # 同一 API key 两次创建间隔 ≥60s（LocalMiniDrama 同口径），只挡 POST、不挡轮询。
+        from lib.agnes_video_key_lease import mark_agnes_submit_attempt, wait_agnes_submit_turn
+
+        async def _note_retry(exc: Exception, attempt: int, wait_seconds: float) -> None:
+            if not arc_task_id:
+                return
+            detail = str(exc).replace("\n", " ").strip()[:180]
+            wait_note = max(1, int(round(wait_seconds)))
+            message = f"Agnes 排队重试中（已尝试 {attempt} 次，约 {wait_note} 秒后再试）：{detail}"
+            try:
+                from lib.generation_queue import get_generation_queue
+
+                await get_generation_queue().update_running_error_message(arc_task_id, message)
+            except Exception:
+                logger.warning("写回 Agnes 排队重试提示失败 task_id=%s", arc_task_id, exc_info=True)
+
+        @with_retry_async(
+            max_attempts=_CREATE_MAX_ATTEMPTS,
+            backoff_seconds=_CREATE_BACKOFF_SECONDS,
+            retry_if=should_retry_submit,
+            on_retry=_note_retry,
         )
-        return _extract_task_id(resp.json())
+        async def _do_create() -> str:
+            await wait_agnes_submit_turn(self._api_key)
+            try:
+                resp = await submit_post(
+                    lambda: client.post(
+                        f"{self._base_url}{_VIDEOS_ENDPOINT}",
+                        json=payload,
+                        headers=agnes_headers(self._api_key),
+                        timeout=_SUBMIT_TIMEOUT_SECONDS,
+                    ),
+                    provider=PROVIDER_AGNES,
+                )
+                return _extract_task_id(resp.json())
+            finally:
+                mark_agnes_submit_attempt(self._api_key)
+
+        provider_task_id = await _do_create()
+        if arc_task_id:
+            try:
+                from lib.generation_queue import get_generation_queue
+
+                await get_generation_queue().update_running_error_message(arc_task_id, None)
+            except Exception:
+                logger.warning("清除 Agnes 排队重试提示失败 task_id=%s", arc_task_id, exc_info=True)
+        return provider_task_id
 
     async def _poll_once(self, client: httpx.AsyncClient, task_id: str) -> dict:
         """轮询一次任务状态。

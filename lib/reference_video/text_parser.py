@@ -8,9 +8,10 @@ from __future__ import annotations
 import unicodedata
 from collections.abc import Collection, Iterable, Iterator
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 from lib.asset_types import BUCKET_KEY, asset_name_comparison_key, normalize_asset_bucket
+from lib.character_looks import format_mention, look_is_registered, split_mention_inner
 from lib.script_models import ReferenceResource
 
 #: BOM / ZWNBSP。前端按 JS 的 ``\s`` 判行首空白，U+FEFF 属之；Python 的 ``str.strip()``
@@ -22,6 +23,14 @@ _BOM = "﻿"
 #: 说话人 mention 与 ``{`` 之间允许出现的分隔冒号（中英各一）。只允许一个：写了第二个
 #: 就说明这不是「``@[角色]：{台词}``」的形态，此时宁可不成记号，也不静默降级成画外音。
 _SPEAKER_SEPARATORS = "：:"
+
+#: 内心独白标记：写在说话人 mention 内层末尾 ``@[角色%内心独白]{…}``。
+#: 结构标记固定为中文关键字（与 ``@造型`` 的 ``@`` 分隔符错开），多语言项目同样逐字使用。
+INNER_MONOLOGUE_SEP = "%"
+INNER_MONOLOGUE_TAG = "内心独白"
+INNER_MONOLOGUE_SUFFIX = f"{INNER_MONOLOGUE_SEP}{INNER_MONOLOGUE_TAG}"
+
+SpeechKind = Literal["dialogue", "voiceover", "inner_monologue"]
 
 
 def _normalize_source(text: str) -> str:
@@ -104,11 +113,60 @@ def _iter_mentions(text: str) -> Iterator[tuple[int, int, str]]:
 
 
 @dataclass(frozen=True)
+class ParsedMention:
+    """画面引用 mention：资产名 + 可选角色造型（``None`` = 基准）。"""
+
+    name: str
+    look: str | None = None
+
+    @property
+    def dedupe_key(self) -> tuple[str, str]:
+        return self.name, self.look or ""
+
+
+def _parse_mention_token(raw: str) -> ParsedMention:
+    name, look = split_mention_inner(_strip_inner_monologue_suffix(raw)[0])
+    return ParsedMention(name=name, look=look)
+
+
+def _strip_inner_monologue_suffix(raw: str) -> tuple[str, bool]:
+    """剥掉内层末尾的 ``%内心独白``；返回 ``(剩余内层, 是否内心独白)``。"""
+    text = raw if isinstance(raw, str) else ""
+    # 入口已 NFC；此处再归一一次，避免单独调用时 NFD 后缀对不上。
+    text = unicodedata.normalize("NFC", text)
+    suffix = unicodedata.normalize("NFC", INNER_MONOLOGUE_SUFFIX)
+    if text.endswith(suffix):
+        return text[: -len(suffix)], True
+    return text, False
+
+
+def parse_speech_speaker_token(raw: str) -> tuple[str, SpeechKind] | None:
+    """解析说话人 mention 内层：``(角色名, kind)``；非法 ``%`` 标记返回 ``None``。
+
+    - 无 ``%``：dialogue
+    - 以 ``%内心独白`` 结尾：inner_monologue（可与 ``角色@造型`` 同写，音色仍挂角色名）
+    - 含其它 ``%…``：不成说话人（调用方不降级成画外音）
+    """
+    remainder, is_monologue = _strip_inner_monologue_suffix(raw)
+    if not is_monologue and INNER_MONOLOGUE_SEP in remainder:
+        return None
+    name, _look = split_mention_inner(remainder)
+    if not name:
+        return None
+    kind: SpeechKind = "inner_monologue" if is_monologue else "dialogue"
+    return name, kind
+
+
+@dataclass(frozen=True)
 class SpeechMark:
     """行内一段发声记号的解析结果。
 
-    ``speaker`` 为空串即画外音（``{台词}``），非空即该角色说这句话（``@[角色]{台词}``）；
-    名称已归一到资产名比对坐标系。``text`` 是花括号内的逐字台词。
+    ``kind``：
+    - ``voiceover``：裸 ``{台词}``（旁白画外音，无说话人）
+    - ``dialogue``：``@[角色]{台词}``（开口说，出镜时可口型）
+    - ``inner_monologue``：``@[角色%内心独白]{台词}``（角色音色心声，出镜亦闭嘴）
+
+    ``speaker`` 在 voiceover 时为空串；名称已归一到资产名比对坐标系。``text`` 是花括号内的逐字台词。
 
     ``raw`` 是该记号在归一后原行里占据的整段原文（含说话人 mention 与其后的空白 / 冒号）：
     「从不删字」的渲染路径（未登记说话人）据此原样回填，无须再回原行按偏移取。
@@ -117,24 +175,34 @@ class SpeechMark:
     speaker: str
     text: str
     raw: str
+    kind: SpeechKind = "voiceover"
+
+    def __post_init__(self) -> None:
+        if self.kind == "voiceover":
+            if self.speaker:
+                raise ValueError("voiceover SpeechMark must have empty speaker")
+        elif not self.speaker:
+            raise ValueError(f"{self.kind} SpeechMark requires a speaker")
 
 
 def split_speech_line(line: str) -> list[str | SpeechMark]:
     """把一行拆成「画面描述片段」与「发声记号」的有序序列（记号可出现在行内任意位置）。
 
-    发声记号有两种，语言无关：``{台词}`` 是画外音；紧接在 ``@[角色]`` 之后（中间允许空白
-    或一个中英冒号）的 ``{台词}`` 是该角色说这句话。``@[角色]：{台词}`` 独占一行是后者的
-    一个特例，同样合法。
+    发声记号三种，语言无关结构：
+    - ``{台词}`` → 画外音（旁白）
+    - ``@[角色]{台词}``（mention 与花括号之间允许空白或一个中英冒号）→ 开口台词
+    - ``@[角色%内心独白]{台词}`` → 内心独白（多角色各写一条即可）
 
     说话人只认「紧贴花括号之前的那个 mention」，不做「行内最近 mention 猜 speaker」式
-    启发式——推断错误会把台词静默绑到错误角色的参考音频上。以下三种一律不成记号，花括号
+    启发式——推断错误会把台词静默绑到错误角色的参考音频上。以下情形一律不成记号，花括号
     留在描述片段里，由调用侧按各自严格度出 warning 或判违约：
 
     - 空台词（``{}`` / ``{   }``）：``Utterance`` 要求 text 非空，放行会派生出没有内容的发声。
-    - 说话人位为空白（``@[ ]{台词}``）：dialogue 要求非空 speaker。
+    - 说话人位为空白（``@[ ]{台词}``）：dialogue / 内心独白要求非空 speaker。
     - 说话人位写坏（``@[]{台词}``、``@[李明{台词}``、``@[张三]：：{台词}``）：花括号前是 ``]``
       或又一个分隔冒号、却没有可用 mention 时不降级成画外音——作者写的是「某人说」，静默改成
       画外音比不识别更难发现。
+    - 说话人内层含非法 ``%`` 标记（不是末尾 ``%内心独白``）：同上，不成记号。
 
     拼接结果（描述片段 + 各记号的 ``raw``）逐字等于归一后的原行，故 ``strip_speech_marks``
     是无损切分的另一半，不会吞字。
@@ -171,13 +239,15 @@ def split_speech_line(line: str) -> list[str | SpeechMark]:
                 head -= 1
 
         speaker = ""
+        kind: SpeechKind = "voiceover"
         start = open_index
         mention = next((m for m in mentions if m[1] == head and m[0] >= cursor), None)
         if mention is not None:
-            speaker = asset_name_comparison_key(mention[2])
-            if not speaker:
+            parsed = parse_speech_speaker_token(mention[2])
+            if parsed is None:
                 scan = close_index + 1
                 continue
+            speaker, kind = parsed
             start = mention[0]
         elif head > cursor and (text[head - 1] == "]" or (separator_colon and text[head - 1] in _SPEAKER_SEPARATORS)):
             scan = close_index + 1
@@ -185,7 +255,7 @@ def split_speech_line(line: str) -> list[str | SpeechMark]:
 
         if start > cursor:
             parts.append(text[cursor:start])
-        parts.append(SpeechMark(speaker=speaker, text=inner, raw=text[start : close_index + 1]))
+        parts.append(SpeechMark(speaker=speaker, text=inner, raw=text[start : close_index + 1], kind=kind))
         cursor = close_index + 1
         scan = cursor
 
@@ -235,7 +305,7 @@ def leading_mention_before_colon(line: str) -> str | None:
     rest = stripped[first[1] :].lstrip()
     if not rest or rest[0] not in "：:":
         return None
-    return asset_name_comparison_key(first[2])
+    return _parse_mention_token(first[2]).name
 
 
 def find_malformed_mention(line: str) -> str | None:
@@ -262,43 +332,61 @@ def find_malformed_mention(line: str) -> str | None:
     return None
 
 
-def extract_mentions(text: str) -> list[str]:
-    """提取正文中的 ``@`` 引用名（保持首次出现顺序、去重）。
+def extract_mention_refs(text: str) -> list[ParsedMention]:
+    """提取正文中的画面 ``@`` 引用（含造型），保持首次出现顺序、按 (名, look) 去重。
 
-    顺序即执行期参考图的编号顺序：正文是唯一真相，没有另一份可以与它分叉的引用列表。
-
-    **发声记号内的说话人位不计入**：给画外说话的角色附参考图会诱导模型把他画进画面，故
-    ``@[角色]{台词}`` 的 speaker 位只驱动音色声明与 utterance 派生，不进参考图。只在记号前
-    出现过的角色因此没有参考图，但台词与音色声明照常；同一行写在记号之外的 ``@[名称]``
-    照常进参考图。
+    发声记号内的说话人位不计入（与 :func:`extract_mentions` 同口径）。
     """
-    seen: set[str] = set()
-    result: list[str] = []
+    seen: set[tuple[str, str]] = set()
+    result: list[ParsedMention] = []
     for raw_line in text.splitlines():
         line = strip_speech_marks(raw_line)
         for _start, _end, raw_name in _iter_mentions(line):
-            name = asset_name_comparison_key(raw_name)
-            if name not in seen:
-                seen.add(name)
-                result.append(name)
+            mention = _parse_mention_token(raw_name)
+            if not mention.name:
+                continue
+            key = mention.dedupe_key
+            if key not in seen:
+                seen.add(key)
+                result.append(mention)
+    return result
+
+
+def extract_mentions(text: str) -> list[str]:
+    """提取正文中的 ``@`` 引用**资产名**（保持首次出现顺序、去重）。
+
+    造型后缀不进入本列表——调用方若只需「提到了哪些资产」用本函数；需要造型选型时用
+    :func:`extract_mention_refs`。顺序即执行期参考图编号顺序的资产维；同一角色不同造型
+    在参考图列表里是多条，见 :func:`derive_references_from_text`。
+
+    **发声记号内的说话人位不计入**：给画外说话的角色附参考图会诱导模型把他画进画面。
+    """
+    seen: set[str] = set()
+    result: list[str] = []
+    for mention in extract_mention_refs(text):
+        if mention.name not in seen:
+            seen.add(mention.name)
+            result.append(mention.name)
     return result
 
 
 def rewrite_mentions(text: str, old_name: str, new_name: str) -> tuple[str, int]:
-    """把文本中指向 *old_name* 的 @ 引用改写为 ``@[new_name]``，返回 ``(新文本, 改写数)``。
+    """把文本中指向 *old_name* 的 @ 引用改写为 ``@[new_name]`` / ``@[new_name@look]``。
 
     资产重命名的正文改写原语：与 ``_iter_mentions`` 同口径识别 mention（含旧式裸 ``@名字``，
-    改写时一并升格为包裹形式），名字判等走比对坐标系（NFC）——正文以 NFD 落盘的同名 mention
-    也会被命中改写。不做其他归一（不去 BOM、不整体 NFC），未命中的字符原样保留：重命名只
-    该改名字本身，不该顺带改写正文的编码形式。已经是目标形式的 mention 不计入改写数。
+    改写时一并升格为包裹形式），名字判等走比对坐标系（NFC）；``@[旧@战损]`` 保留造型后缀。
+    不做其他归一（不去 BOM、不整体 NFC），未命中的字符原样保留。
     """
     target = asset_name_comparison_key(old_name)
-    replacement = f"@[{new_name}]"
     pieces: list[str] = []
     last = 0
     count = 0
-    for start, end, name in _iter_mentions(text):
-        if asset_name_comparison_key(name) != target or text[start:end] == replacement:
+    for start, end, raw in _iter_mentions(text):
+        mention = _parse_mention_token(raw)
+        if mention.name != target:
+            continue
+        replacement = f"@[{format_mention(new_name, mention.look)}]"
+        if text[start:end] == replacement:
             continue
         pieces.append(text[last:start])
         pieces.append(replacement)
@@ -313,35 +401,26 @@ def rewrite_mentions(text: str, old_name: str, new_name: str) -> tuple[str, int]
 def derive_references_from_text(text: str, project: dict) -> tuple[list[ReferenceResource], list[str]]:
     """书写层正文 → ``(references, missing)`` 的唯一派生入口。
 
-    参考图是纯派生物、不落盘：机器产物校验（``lib.reference_video.draft_validation
-    .validate_unit_text``）、编辑器预览与执行期请求投影都经本函数从同一份正文派生。三者的
-    **严格度**按「产物来源是否有作者意图可保护」分流——机器产物对 ``missing`` 与能力上限一律拒，
-    人写产物只警告、照常生成——但**派生本身**必须同一套：分成多处各自 ``extract_mentions`` +
-    ``resolve_references`` 时，任一侧的口径调整（如台词记号的说话人位不计入参考图）都会让同一份
-    正文在编辑器与生成侧派生出不同的 ``图N`` 编号。
+    参考图是纯派生物、不落盘：机器产物校验、编辑器预览与执行期请求投影都经本函数从同一份
+    正文派生。``missing`` 含未登记资产名，以及「角色已登记但造型未登记」时的 ``角色@造型`` 键。
     """
-    return resolve_references(extract_mentions(text), project)
+    return resolve_references(extract_mention_refs(text), project)
 
 
 def render_mentions_as_subjects(text: str, names: Collection[str]) -> str:
-    """把 prompt 中的 ``@[X]`` / ``@X`` 替换为三段论的主体记号 ``<X>``。
+    """把 prompt 中的 ``@[X]`` / ``@[X@look]`` / ``@X`` 替换为三段论的主体记号 ``<X>``。
 
-    ``names`` 是资产表里已登记的名字——``<X>`` 是画面主体记号、不指向参考图编号，故不随
-    能力上限裁剪收窄。不在其中的 mention 原样保留、从不删字（据此「拼接文本去空白后为空」
-    等价于「渲染后为空」，空提示词校验可在入队侧无损完成）。
-
-    正文与 ``names`` 都归一到比对坐标系后再判成员：不归一时，NFD 落盘的 ``@[名称]`` 与 NFC
-    登记的同一个名字判不相等，该 mention 会被当成未登记而原样保留，``@[名称]`` 这个书写层
-    记号就直接漏进了供应商请求。
+    ``names`` 是资产表里已登记的名字——``<X>`` 是画面主体记号、不指向参考图编号；造型后缀
+    在主体记号里去掉（同一角色不同造型仍是同一主体名）。不在其中的 mention 原样保留、从不删字。
     """
     normalized_names = {asset_name_comparison_key(name) for name in names}
     text = _normalize_source(text)
     parts: list[str] = []
     last = 0
-    for start, end, name in _iter_mentions(text):
+    for start, end, raw in _iter_mentions(text):
         parts.append(text[last:start])
-        canonical = asset_name_comparison_key(name)
-        parts.append(f"<{canonical}>" if canonical in normalized_names else text[start:end])
+        mention = _parse_mention_token(raw)
+        parts.append(f"<{mention.name}>" if mention.name in normalized_names else text[start:end])
         last = end
 
     parts.append(text[last:])
@@ -349,21 +428,14 @@ def render_mentions_as_subjects(text: str, names: Collection[str]) -> str:
 
 
 def resolve_references(
-    names: list[str],
+    mentions: list[ParsedMention] | list[str],
     project: dict,
 ) -> tuple[list[ReferenceResource], list[str]]:
-    """按 project.json 四类资产把 mention 名字分派成 ReferenceResource。
+    """按 project.json 四类资产把 mention 分派成 ReferenceResource。
 
-    新项目资产共用名称空间；对历史重复名仍按产品→角色→场景→道具稳定决议。
-
-    名字与三张资产表都先归一到比对坐标系（:func:`lib.asset_types.asset_name_comparison_key`），
-    产出的 ``ReferenceResource.name`` 与 ``missing`` 因此一律是归一形式：下游拿它回查资产表、
-    与说话人判等、在正文里替换成主体记号 ``<X>``，三处都要与这里的判定同形，否则「这里判已
-    登记、下游查不到」。入参 ``names`` 通常已出自本模块的解析器（已归一），归一是幂等的补齐，
-    覆盖直接传外部名字的调用方。
-
-    Returns:
-        (refs, missing): refs 保持入参顺序；missing 是没在任何 bucket 找到的名字
+    入参可以是 :class:`ParsedMention` 列表或旧式纯名字列表（后者一律视为基准造型）。
+    角色带未登记造型时：仍产出 character 引用（look 填入），同时把 ``角色@造型`` 记入 missing，
+    供机器校验拒盘 / 人写路径警告。
     """
     buckets: dict[str, dict[str, Any]] = {
         "product": normalize_asset_bucket(project.get(BUCKET_KEY["product"])),
@@ -373,15 +445,39 @@ def resolve_references(
     }
     refs: list[ReferenceResource] = []
     missing: list[str] = []
-    seen: set[str] = set()
-    for raw_name in names:
-        name = asset_name_comparison_key(raw_name)
-        if name in seen:
-            continue
-        seen.add(name)
-        match = next((rtype for rtype, bucket in buckets.items() if name in bucket), None)
-        if match is not None:
-            refs.append(ReferenceResource(type=match, name=name))  # type: ignore[arg-type]
+    seen: set[tuple[str, str, str]] = set()
+    normalized: list[ParsedMention] = []
+    for item in mentions:
+        if isinstance(item, ParsedMention):
+            normalized.append(item)
         else:
-            missing.append(name)
+            normalized.append(ParsedMention(name=asset_name_comparison_key(item), look=None))
+
+    for mention in normalized:
+        name = mention.name
+        look = mention.look
+        dedupe = (name, look or "", "")
+        match = next((rtype for rtype, bucket in buckets.items() if name in bucket), None)
+        if match is None:
+            miss_key = format_mention(name, look) if look else name
+            if miss_key not in missing:
+                missing.append(miss_key)
+            continue
+        if look is not None and match != "character":
+            miss_key = format_mention(name, look)
+            if miss_key not in missing:
+                missing.append(miss_key)
+            look = None
+        if match == "character" and look is not None:
+            entry = buckets["character"].get(name)
+            if isinstance(entry, dict) and not look_is_registered(entry, look):
+                miss_key = format_mention(name, look)
+                if miss_key not in missing:
+                    missing.append(miss_key)
+                # 仍带 look 产出，执行期选图会失败并走 missing 资产；机器校验用 missing 拒盘
+        dedupe = (match, name, look or "")
+        if dedupe in seen:
+            continue
+        seen.add(dedupe)
+        refs.append(ReferenceResource(type=match, name=name, look=look))  # type: ignore[arg-type]
     return refs, missing

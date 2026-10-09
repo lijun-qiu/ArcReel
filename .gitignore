@@ -92,11 +92,19 @@ deploy/.env
 deploy/projects/
 deploy/vertex_keys/
 deploy/claude_data/
+deploy/tmp_probe/
+deploy/tmp_*_probe/
 deploy/production/.env
 deploy/production/projects/
 deploy/production/vertex_keys/
 deploy/production/claude_data/
 deploy/production/pgdata/
+
+# Local probe / comparison artifacts (frames, wav snippets, one-off dumps)
+.tmp_*/
+.pytest_cache/
+deploy/frame_*.jpg
+deploy/_*.log
 
 # scripts/verify_reference_video_sdks.py 的输出目录，报告是运行时快照
 docs/verification-reports/

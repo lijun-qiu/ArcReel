@@ -17,7 +17,10 @@ logger = logging.getLogger(__name__)
 
 _DEFAULT_VIDEO_BACKEND = "agnes/agnes-video-2.5-flash"
 _DEFAULT_IMAGE_BACKEND = "agnes/agnes-image-2.5-flash"
-_DEFAULT_TEXT_BACKEND = "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free"
+# 文本档位：简单 → Flash，复杂 → Pro；默认模型兜底用 Pro（档位未设时复杂任务更安全）。
+_DEFAULT_TEXT_BACKEND_SIMPLE = "modelscope/deepseek-ai/DeepSeek-V4-Flash-0731"
+_DEFAULT_TEXT_BACKEND_COMPLEX = "modelscope/deepseek-ai/DeepSeek-V4-Pro"
+_DEFAULT_TEXT_BACKEND = _DEFAULT_TEXT_BACKEND_COMPLEX
 _DEFAULT_AUDIO_BACKEND = "dashscope/qwen3-tts-flash"
 # 旁白默认音色（DashScope 预设）；可被 project.json 顶层 narration_voice 或全局 setting 覆盖
 # （与 video_backend 等同走顶层 key，非 settings 子字典）。
@@ -96,7 +99,9 @@ async def build_anthropic_env_dict(session: AsyncSession) -> dict[str, str]:
 
         api_key = cred.api_key or ""
         base_url = upstream
-        if len(pool) >= 2:
+        # 多 key（≥2）走进程内轮换；单 key 直连上游（含本机魔搭/OpenRouter 注入代理）。
+        use_rotator = len(pool) >= 2
+        if use_rotator:
             try:
                 from server.agent_runtime.anthropic_key_rotator import get_rotator
 
@@ -108,7 +113,7 @@ async def build_anthropic_env_dict(session: AsyncSession) -> dict[str, str]:
                     "anthropic key rotator unavailable (%s); falling back to first pool key",
                     exc,
                 )
-                api_key = pool[0].key
+                api_key = pool[0].key if pool else (cred.api_key or "")
                 base_url = upstream
 
         return {
@@ -130,7 +135,8 @@ async def build_anthropic_env_dict(session: AsyncSession) -> dict[str, str]:
 
 def _looks_like_local_proxy_url(url: str) -> bool:
     lowered = url.lower()
-    return "host.docker.internal" in lowered or ":10002" in lowered or "127.0.0.1:" in lowered
+    # 魔搭/OpenRouter 本机注入代理是预期上游；仅对可疑的 anthropic 官方代理口误配告警。
+    return ":10002" in lowered and ("host.docker.internal" in lowered or "127.0.0.1:" in lowered)
 
 
 @dataclass

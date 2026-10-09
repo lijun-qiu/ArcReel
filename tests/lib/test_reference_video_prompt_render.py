@@ -12,6 +12,7 @@ from lib.reference_video.prompt_render import (
     resolve_reference_audio_paths,
 )
 from lib.reference_video.script_preview import (
+    WARN_OFFSCREEN_SPEECH_LIP_RISK,
     WARN_REFERENCE_AUDIO_OVERFLOW,
     WARN_SILENT_MODEL,
     WARN_SPEAKER_AUDIO_NEEDS_IMAGE,
@@ -232,6 +233,58 @@ def test_voiceover_line_renders_as_offscreen_speech():
     assert "画外音说 {多年以后他仍记得这句话。}" in rendered.prompt
 
 
+def test_inner_monologue_renders_as_character_inner_voice_not_spoken():
+    """内心独白挂角色音色句式，不用「说」——避免诱导出口型。"""
+    rendered = render_unit_prompt(
+        "@[张三] 望向窗外。@[张三%内心独白]{他不会回来了。}",
+        _project(),
+        _refs(("character", "张三")),
+        _SOFT,
+    )
+    assert (
+        "<张三>内心独白 {他不会回来了。}（仅此心声瞬间：嘴唇紧闭，不做说话口型）"
+        in rendered.prompt
+    )
+    assert "<张三>说 {他不会回来了。}" not in rendered.prompt
+    assert "画外音说 {他不会回来了。}" not in rendered.prompt
+    # 纯心声出镜：第三段仍逐名 mute + 通用口型包
+    assert "<张三>嘴唇紧闭，不做说话口型。" in rendered.prompt
+    assert "仅「内心独白」标注的瞬间" in rendered.prompt
+
+
+def test_mixed_monologue_and_dialogue_mutes_only_monologue_beat():
+    """同一人同段既有心声又有开口：闭嘴句只贴心声；对白贴「正常说话口型」。"""
+    rendered = render_unit_prompt(
+        "@[张三] 敲键盘。@[张三%内心独白]{键盘太肉了。}@[李四]{生日想要什么？}@[张三]{洗碗机。}",
+        _project(),
+        _refs(("character", "张三"), ("character", "李四")),
+        _SOFT,
+    )
+    assert (
+        "<张三>内心独白 {键盘太肉了。}（仅此心声瞬间：嘴唇紧闭，不做说话口型）"
+        in rendered.prompt
+    )
+    assert "<张三>说 {洗碗机。}（此时正常说话口型）" in rendered.prompt
+    assert "<李四>说 {生日想要什么？}（此时正常说话口型）" in rendered.prompt
+    # 两人都有开口对白 → 第三段不对任何人整段 mute（否则会压死对白口型）
+    assert "<张三>嘴唇紧闭，不做说话口型。" not in rendered.prompt
+    assert "<李四>嘴唇紧闭，不做说话口型。" not in rendered.prompt
+    assert "禁止因心声约束而全程闭嘴" in rendered.prompt
+
+
+def test_bare_voiceover_stays_offscreen_beside_inner_monologue():
+    rendered = render_unit_prompt(
+        "@[张三] 伫立。@[张三%内心独白]{心声}{远处有脚步。}",
+        _project(),
+        _refs(("character", "张三")),
+        _SOFT,
+    )
+    assert (
+        "<张三>内心独白 {心声}（仅此心声瞬间：嘴唇紧闭，不做说话口型）" in rendered.prompt
+    )
+    assert "画外音说 {远处有脚步。}" in rendered.prompt
+
+
 def test_inline_speech_renders_the_same_official_phrasing_as_the_whole_line_form():
     """内联记号与整行写法渲染出同一段官方句式，只是行文位置随作者所写。"""
     legacy = render_unit_prompt(
@@ -318,6 +371,50 @@ def test_silent_path_adds_no_speech_constraint():
     rendered = render_unit_prompt("镜头1：空镜。", _project(), [], silent)
     assert "成片必须完全无声" in rendered.prompt
     assert "不要对白" in rendered.prompt
+
+
+def test_offscreen_speech_injects_mute_lines_and_lip_pack():
+    """画外说话 + 出镜未说话角色：第三段逐名闭嘴，并注入画外口型约束包。"""
+    text = "@[张三] 被按在地上。@[李四]{你以为你很能打？}"
+    rendered = render_unit_prompt(
+        text,
+        _project(),
+        _refs(("character", "张三")),
+        VoiceRenderSettings(voice_consistency="soft"),
+    )
+    assert "<张三>嘴唇紧闭，不做说话口型。" in rendered.prompt
+    assert "不要把画外台词或心声的口型加到他们脸上。" in rendered.prompt
+    assert "禁止因心声约束而全程闭嘴" in rendered.prompt
+    assert {
+        "key": WARN_OFFSCREEN_SPEECH_LIP_RISK,
+        "params": {"speakers": "李四", "faces": "张三"},
+    } in rendered.warnings
+
+
+def test_offscreen_speech_lip_pack_skipped_on_silent_path():
+    """无声路径已要求全员闭嘴，不再叠画外口型包；warning 仍发。"""
+    text = "@[张三] 被按在地上。@[李四]{你以为你很能打？}"
+    rendered = render_unit_prompt(
+        text,
+        _project(),
+        _refs(("character", "张三")),
+        VoiceRenderSettings(voice_consistency="none"),
+    )
+    assert "成片必须完全无声" in rendered.prompt
+    assert "不要把画外台词的口型加到画面人物脸上。" not in rendered.prompt
+    assert "<张三>嘴唇紧闭" not in rendered.prompt
+    assert WARN_OFFSCREEN_SPEECH_LIP_RISK in {w["key"] for w in rendered.warnings}
+
+
+def test_on_screen_speaker_does_not_get_lip_guard():
+    rendered = render_unit_prompt(
+        "@[张三] 推门。@[张三]{我来了}",
+        _project(),
+        _refs(("character", "张三")),
+        _SOFT,
+    )
+    assert "不要把画外台词的口型加到画面人物脸上。" not in rendered.prompt
+    assert WARN_OFFSCREEN_SPEECH_LIP_RISK not in {w["key"] for w in rendered.warnings}
 
 
 def test_twin_guard_only_when_two_or_more_character_images():

@@ -176,7 +176,12 @@ export function PresentationPlayer({
       const audio = audioRef.current;
       const narration = presentation?.narration_audio;
       if (!audio || !narration || !presentation) return;
-      audio.volume = Math.min(1, video.volume * narration.gain);
+      const videoGain = presentation.video.gain;
+      const master =
+        presentation.video.audio_enabled && videoGain > 0
+          ? Math.min(1, video.volume / videoGain)
+          : video.volume;
+      audio.volume = Math.min(1, master * narration.gain);
       audio.muted = presentation.video.audio_enabled && presentation.video.gain > 0 ? video.muted : false;
       audio.playbackRate = video.playbackRate;
     },
@@ -185,7 +190,15 @@ export function PresentationPlayer({
 
   useEffect(() => {
     if (videoRef.current && presentation) {
-      videoRef.current.volume = presentation.narration_audio?.gain ?? presentation.video.gain;
+      const master = 1;
+      if (presentation.video.audio_enabled && presentation.video.gain > 0) {
+        videoRef.current.volume = Math.min(1, master * presentation.video.gain);
+      } else if (presentation.narration_audio) {
+        // Provider track is silent: the video element still owns the volume slider as master.
+        videoRef.current.volume = Math.min(1, master * presentation.narration_audio.gain);
+      } else {
+        videoRef.current.volume = presentation.video.gain;
+      }
       videoRef.current.muted = !presentation.video.audio_enabled || presentation.video.gain === 0;
       enforceVideoAudioPolicy(videoRef.current);
       synchronizeNarrationControls(videoRef.current);

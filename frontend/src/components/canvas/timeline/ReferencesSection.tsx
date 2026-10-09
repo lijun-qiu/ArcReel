@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { Edit3, MapPin, Plus, Puzzle, User } from "lucide-react";
+import { Edit3, Film, MapPin, Plus, Puzzle, User } from "lucide-react";
+import { API } from "@/api";
 import { AvatarStack } from "@/components/ui/AvatarStack";
 import { ClueStack } from "@/components/ui/ClueStack";
 import {
@@ -8,7 +9,11 @@ import {
   type SegmentRefsChanges,
 } from "@/components/ui/SegmentRefsEditModal";
 import { useProjectsStore } from "@/stores/projects-store";
-import { charactersFieldFor, type EditorContentMode } from "@/utils/script-shape";
+import {
+  charactersFieldFor,
+  type EditorContentMode,
+  type PreviousStoryboardRef,
+} from "@/utils/script-shape";
 import { WARM_TONE } from "@/utils/severity-tone";
 
 interface ReferencesSectionProps {
@@ -20,6 +25,12 @@ interface ReferencesSectionProps {
   onSave: (patch: Record<string, string[]>) => void | Promise<void>;
   disabled?: boolean;
   disabledHint?: string;
+  /** Available previous-shot storyboard (geometry rules already met); omit group when null. */
+  previousStoryboard?: PreviousStoryboardRef | null;
+  /** Whether to inject previous shot as continuity reference; default true. */
+  usePreviousStoryboard?: boolean;
+  /** Toggle previous-shot injection; omit for read-only (no exclude/restore). */
+  onTogglePreviousStoryboard?: (enabled: boolean) => void | Promise<void>;
 }
 
 const EMPTY_DICT = Object.freeze({});
@@ -39,22 +50,27 @@ export function ReferencesSection({
   onSave,
   disabled,
   disabledHint,
+  previousStoryboard = null,
+  usePreviousStoryboard = true,
+  onTogglePreviousStoryboard,
 }: ReferencesSectionProps) {
   const { t } = useTranslation("dashboard");
   const project = useProjectsStore((s) => s.currentProjectData);
-  // 用 useMemo 把 `?? {}` fallback 物化成稳定引用，避免 hook deps 每次重算
+  // Stabilize `?? {}` fallback so hook deps do not churn every render.
   const characters = useMemo(() => project?.characters ?? EMPTY_DICT, [project]);
   const scenes = useMemo(() => project?.scenes ?? EMPTY_DICT, [project]);
   const props = useMemo(() => project?.props ?? EMPTY_DICT, [project]);
   const [open, setOpen] = useState(false);
+  const [togglingPrevious, setTogglingPrevious] = useState(false);
 
   const charField = charactersFieldFor(contentMode);
 
   const totalCount = characterNames.length + sceneNames.length + propNames.length;
-  const isEmpty = totalCount === 0;
+  const hasPrevious = previousStoryboard != null;
+  const isEmpty = totalCount === 0 && !hasPrevious;
 
   const totalStale = useMemo(() => {
-    // project 未加载完时字典为空，会把所有已引用名都误判为 stale；此时跳过计算
+    // Empty dicts while project is loading would mark every name stale; skip until loaded.
     if (!project) return 0;
     return (
       countMissing(characterNames, characters) +
@@ -88,6 +104,16 @@ export function ReferencesSection({
     setOpen(true);
   };
 
+  const handleTogglePrevious = async () => {
+    if (!onTogglePreviousStoryboard || togglingPrevious || disabled) return;
+    setTogglingPrevious(true);
+    try {
+      await onTogglePreviousStoryboard(!usePreviousStoryboard);
+    } finally {
+      setTogglingPrevious(false);
+    }
+  };
+
   const eyebrow = (
     <div
       className="text-[10.5px] font-bold uppercase"
@@ -116,6 +142,19 @@ export function ReferencesSection({
       projectName={projectName}
     />
   ) : null;
+
+  const previousGroup =
+    hasPrevious && previousStoryboard ? (
+      <PreviousStoryboardGroup
+        projectName={projectName}
+        previous={previousStoryboard}
+        enabled={usePreviousStoryboard}
+        canToggle={Boolean(onTogglePreviousStoryboard) && !disabled}
+        toggling={togglingPrevious}
+        disabledHint={disabledHint}
+        onToggle={() => void handleTogglePrevious()}
+      />
+    ) : null;
 
   if (isEmpty) {
     return (
@@ -172,7 +211,7 @@ export function ReferencesSection({
             }}
             title={t("segment_refs_stale_hint")}
           >
-            <span aria-hidden="true">⚠</span>
+            <span aria-hidden="true">{"\u26A0"}</span>
             <span>{t("segment_refs_stale_badge", { count: totalStale })}</span>
           </span>
         )}
@@ -200,73 +239,185 @@ export function ReferencesSection({
         </button>
       </div>
 
-      <button
-        type="button"
-        onClick={openModal}
-        disabled={disabled}
-        title={disabled ? disabledHint : t("segment_refs_edit_button")}
-        className="focus-ring group flex w-full flex-wrap items-center gap-x-3 gap-y-1.5 rounded-md px-3 py-2 text-left transition-colors disabled:cursor-not-allowed disabled:opacity-60"
+      <div
+        className="flex w-full flex-wrap items-center gap-x-3 gap-y-1.5 rounded-md px-3 py-2"
         style={{
           border: "1px solid var(--color-hairline-soft)",
           background: "oklch(0.20 0.011 265 / 0.4)",
         }}
-        onMouseEnter={(e) => {
-          if (disabled) return;
-          e.currentTarget.style.borderColor = "var(--color-hairline-strong)";
-        }}
-        onMouseLeave={(e) => {
-          e.currentTarget.style.borderColor = "var(--color-hairline-soft)";
-        }}
       >
         {characterNames.length > 0 && (
-          <Group
-            icon={<User className="h-3 w-3" aria-hidden="true" />}
-            label={t("references_badge_character")}
-            count={characterNames.length}
+          <button
+            type="button"
+            onClick={openModal}
+            disabled={disabled}
+            title={disabled ? disabledHint : t("segment_refs_edit_button")}
+            className="focus-ring group rounded-md text-left transition-colors disabled:cursor-not-allowed disabled:opacity-60"
           >
-            <AvatarStack
-              names={characterNames}
-              characters={characters}
-              projectName={projectName}
-              maxShow={4}
-            />
-          </Group>
+            <Group
+              icon={<User className="h-3 w-3" aria-hidden="true" />}
+              label={t("references_badge_character")}
+              count={characterNames.length}
+            >
+              <AvatarStack
+                names={characterNames}
+                characters={characters}
+                projectName={projectName}
+                maxShow={4}
+              />
+            </Group>
+          </button>
         )}
         {sceneNames.length > 0 && (
-          <Group
-            icon={<MapPin className="h-3 w-3" aria-hidden="true" />}
-            label={t("references_badge_scene")}
-            count={sceneNames.length}
+          <button
+            type="button"
+            onClick={openModal}
+            disabled={disabled}
+            title={disabled ? disabledHint : t("segment_refs_edit_button")}
+            className="focus-ring group rounded-md text-left transition-colors disabled:cursor-not-allowed disabled:opacity-60"
           >
-            <ClueStack
-              sceneNames={sceneNames}
-              propNames={[]}
-              scenes={scenes}
-              props={props}
-              projectName={projectName}
-              maxShow={4}
-            />
-          </Group>
+            <Group
+              icon={<MapPin className="h-3 w-3" aria-hidden="true" />}
+              label={t("references_badge_scene")}
+              count={sceneNames.length}
+            >
+              <ClueStack
+                sceneNames={sceneNames}
+                propNames={[]}
+                scenes={scenes}
+                props={props}
+                projectName={projectName}
+                maxShow={4}
+              />
+            </Group>
+          </button>
         )}
         {propNames.length > 0 && (
-          <Group
-            icon={<Puzzle className="h-3 w-3" aria-hidden="true" />}
-            label={t("references_badge_prop")}
-            count={propNames.length}
+          <button
+            type="button"
+            onClick={openModal}
+            disabled={disabled}
+            title={disabled ? disabledHint : t("segment_refs_edit_button")}
+            className="focus-ring group rounded-md text-left transition-colors disabled:cursor-not-allowed disabled:opacity-60"
           >
-            <ClueStack
-              sceneNames={[]}
-              propNames={propNames}
-              scenes={scenes}
-              props={props}
-              projectName={projectName}
-              maxShow={4}
-            />
-          </Group>
+            <Group
+              icon={<Puzzle className="h-3 w-3" aria-hidden="true" />}
+              label={t("references_badge_prop")}
+              count={propNames.length}
+            >
+              <ClueStack
+                sceneNames={[]}
+                propNames={propNames}
+                scenes={scenes}
+                props={props}
+                projectName={projectName}
+                maxShow={4}
+              />
+            </Group>
+          </button>
         )}
-      </button>
+        {previousGroup}
+        {totalCount === 0 && hasPrevious ? (
+          <button
+            type="button"
+            onClick={openModal}
+            disabled={disabled}
+            title={disabled ? disabledHint : t("references_add_cta")}
+            className="focus-ring inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[11px] transition-colors disabled:cursor-not-allowed disabled:opacity-50"
+            style={{ color: "var(--color-accent-2)" }}
+          >
+            <Plus className="h-3 w-3" aria-hidden="true" />
+            <span>{t("references_add_cta")}</span>
+          </button>
+        ) : null}
+      </div>
 
       {modal}
+    </div>
+  );
+}
+
+function PreviousStoryboardGroup({
+  projectName,
+  previous,
+  enabled,
+  canToggle,
+  toggling,
+  disabledHint,
+  onToggle,
+}: {
+  projectName: string;
+  previous: PreviousStoryboardRef;
+  enabled: boolean;
+  canToggle: boolean;
+  toggling: boolean;
+  disabledHint?: string;
+  onToggle: () => void;
+}) {
+  const { t } = useTranslation("dashboard");
+  const fp = useProjectsStore((s) => s.getAssetFingerprint(previous.path));
+  const url = API.getFileUrl(projectName, previous.path, fp);
+  const toggleLabel = enabled
+    ? t("references_previous_exclude")
+    : t("references_previous_restore");
+  const title = enabled
+    ? t("references_previous_hint", { id: previous.id })
+    : t("references_previous_excluded_hint", { id: previous.id });
+
+  return (
+    <div
+      className="flex items-center gap-2"
+      style={{ opacity: enabled ? 1 : 0.55 }}
+      title={title}
+    >
+      <div
+        className="h-7 w-7 overflow-hidden rounded"
+        style={{
+          border: enabled
+            ? "1px solid var(--color-hairline-soft)"
+            : "1px dashed var(--color-hairline)",
+        }}
+      >
+        <img
+          src={url}
+          alt={t("references_previous_alt", { id: previous.id })}
+          className="h-full w-full object-cover"
+        />
+      </div>
+      <span
+        className="inline-flex items-center gap-1 text-[11px]"
+        style={{ color: "var(--color-text-3)" }}
+      >
+        <span style={{ color: "var(--color-text-4)" }}>
+          <Film className="h-3 w-3" aria-hidden="true" />
+        </span>
+        <span>{t("references_badge_previous")}</span>
+        <span className="num" style={{ color: "var(--color-text-2)" }}>
+          {previous.id}
+        </span>
+        {!enabled ? (
+          <span style={{ color: "var(--color-text-4)" }}>
+            {t("references_previous_excluded_badge")}
+          </span>
+        ) : null}
+      </span>
+      {canToggle ? (
+        <button
+          type="button"
+          onClick={onToggle}
+          disabled={toggling}
+          title={disabledHint ?? toggleLabel}
+          aria-label={toggleLabel}
+          aria-pressed={enabled}
+          className="focus-ring rounded px-1.5 py-0.5 text-[10.5px] transition-colors disabled:cursor-not-allowed disabled:opacity-50"
+          style={{
+            color: enabled ? "var(--color-text-3)" : "var(--color-accent-2)",
+            border: "1px solid var(--color-hairline-soft)",
+          }}
+        >
+          {toggleLabel}
+        </button>
+      ) : null}
     </div>
   );
 }

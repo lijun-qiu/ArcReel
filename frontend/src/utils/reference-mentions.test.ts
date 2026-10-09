@@ -15,6 +15,11 @@ function marks(line: string): [string, string][] {
   return lineSpeechMarks(line).map((mark) => [mark.speaker, mark.text]);
 }
 
+/** 含 kind 的记号断言。 */
+function marksKind(line: string): [string, string, string][] {
+  return lineSpeechMarks(line).map((mark) => [mark.kind, mark.speaker, mark.text]);
+}
+
 /** 判定路径的输入来自已归一的 `splitScriptLines`；直测原语时补同一道归一。 */
 function normalize(text: string): string {
   return splitScriptLines(text)[0] ?? "";
@@ -148,6 +153,26 @@ describe("buildMentionLookup", () => {
 
     expect(lookup.Shared).toBe("product");
   });
+
+  it("registers non-base character looks as name@look keys", () => {
+    const lookup = buildMentionLookup({
+      characters: {
+        林北: {
+          looks: {
+            base: { description: "基准" },
+            战损: { description: "战损" },
+          },
+        },
+      },
+      scenes: {},
+      props: {},
+      products: {},
+    } as never);
+
+    expect(lookup["林北"]).toBe("character");
+    expect(lookup["林北@战损"]).toBe("character");
+    expect(Object.hasOwn(lookup, "林北@base")).toBe(false);
+  });
 });
 
 describe("normalizeAssetName", () => {
@@ -249,7 +274,8 @@ describe("inline speech marks", () => {
   it("does not treat a blank speaker slot as a speech mark", () => {
     // 同后端 split_speech_line：speaker 位全为空白不成记号，否则会派生出非法 utterance
     expect(marks("@[ ]：{我来了}")).toEqual([]);
-    expect(extractMentions("@[ ]：{我来了}")).toEqual([""]);
+    // 空白名不进画面引用（与 extract_mention_refs 跳过空名同口径）
+    expect(extractMentions("@[ ]：{我来了}")).toEqual([]);
   });
 
   it("does not fall back to voiceover when the speaker slot is malformed", () => {
@@ -262,6 +288,29 @@ describe("inline speech marks", () => {
     expect(marks("@[张三]：：{我来了}")).toEqual([]);
     expect(stripSpeechMarks("@[张三]：：{我来了}")).toBe("@[张三]：：{我来了}");
     expect(marks("门开了。@[张三]:: {我来了}")).toEqual([]);
+  });
+
+  it("parses @[角色%内心独白]{…} as inner_monologue with character voice", () => {
+    expect(marksKind("@[张三%内心独白]{小时候的遗憾}")).toEqual([
+      ["inner_monologue", "张三", "小时候的遗憾"],
+    ]);
+    expect(marksKind("@[张三%内心独白]：{心声}")).toEqual([["inner_monologue", "张三", "心声"]]);
+  });
+
+  it("keeps bare voiceover beside inner monologue", () => {
+    expect(marksKind("@[张三%内心独白]{心声}{旁白}")).toEqual([
+      ["inner_monologue", "张三", "心声"],
+      ["voiceover", "", "旁白"],
+    ]);
+  });
+
+  it("rejects unknown % tags in the speaker slot", () => {
+    expect(marks("@[张三%旁白]{台词}")).toEqual([]);
+    expect(stripSpeechMarks("@[张三%旁白]{台词}")).toBe("@[张三%旁白]{台词}");
+  });
+
+  it("strips %内心独白 from visual mention names", () => {
+    expect(extractMentions("@[张三%内心独白] 站在窗前")).toEqual(["张三"]);
   });
 
   it("still binds the speaker across a single separator colon", () => {

@@ -157,7 +157,8 @@ def rewrite_payload_references(payload: dict, asset_type: str, old_name: str, ne
 def renamed_file_stem(stem: str, old_name: str, new_name: str, *, allow_sequence: bool = False) -> str | None:
     """按「文件 stem = 资产名」不变式推导改名后的 stem；与旧名无关时返回 None。
 
-    默认只认 stem 归一后**精确等于**旧名（sheet / 参考图 / 参考音频）。``allow_sequence``
+    默认只认 stem 归一后**精确等于**旧名（sheet / 参考图 / 参考音频），以及角色衣橱
+    ``旧名__look``（见 :func:`lib.character_looks.renamed_look_stem`）。``allow_sequence``
     额外放行 ``旧名_{序号}`` 形态（product 多图序列，见 server/routers/files.py 的
     sequenced 命名），仅可用于确实按序号累积命名的位置：资产名本身允许下划线加数字
     （``validate_asset_name`` 不禁），在普通目录放行该形态会把兄弟资产「旧名_2」的文件
@@ -165,6 +166,11 @@ def renamed_file_stem(stem: str, old_name: str, new_name: str, *, allow_sequence
 
     比对与拼接都在归一坐标系上进行——macOS 落盘的文件名可能是 NFD。
     """
+    from lib.character_looks import renamed_look_stem
+
+    look_renamed = renamed_look_stem(stem, old_name, new_name)
+    if look_renamed is not None:
+        return look_renamed
     normalized = normalize_asset_name(stem)
     target = normalize_asset_name(old_name)
     if normalized == target:
@@ -222,6 +228,18 @@ def rewrite_entry_paths(entry: dict, spec: AssetSpec, old_name: str, new_name: s
                 if renamed is not None:
                     images[i] = renamed
                     count += 1
+    looks = entry.get("looks")
+    if isinstance(looks, dict) and spec.asset_type == "character":
+        for look_entry in looks.values():
+            if not isinstance(look_entry, dict):
+                continue
+            for field in ("character_sheet", "reference_image"):
+                value = look_entry.get(field)
+                if isinstance(value, str) and value:
+                    renamed = rewrite(value)
+                    if renamed is not None:
+                        look_entry[field] = renamed
+                        count += 1
     return count
 
 

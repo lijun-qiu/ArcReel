@@ -157,8 +157,10 @@ function TaskRow({
   const warnings = task.status === "succeeded" ? taskWarnings(task) : [];
   const hasWarnings = warnings.length > 0;
   const hasError = Boolean(task.status === "failed" && task.error_message);
+  // running 时 error_message 承载供应商排队/重试提示（如 Agnes 503），非终态失败。
+  const hasRunningNote = Boolean(task.status === "running" && task.error_message);
   // 失败原因与生成警示走同一套展开交互：一行最多只有其中一种详情。
-  const isExpandable = hasError || hasWarnings;
+  const isExpandable = hasError || hasWarnings || hasRunningNote;
   const isExpanded = expandedTaskId === task.task_id;
 
   // 底色标的是任务状态，与「有没有详情可展开」解耦：失败任务即使没有 error_message
@@ -224,6 +226,15 @@ function TaskRow({
         >
           {statusLabel[task.status]}
         </span>
+        {hasRunningNote && !isExpanded && (
+          <span
+            className="max-w-[40%] truncate text-[10px]"
+            style={{ color: "var(--color-text-3)" }}
+            title={task.error_message ?? undefined}
+          >
+            {task.error_message}
+          </span>
+        )}
         {task.status === "queued" && onCancel && (
           <button
             type="button"
@@ -327,14 +338,20 @@ function TaskRow({
             transition={{ duration: 0.15 }}
             className="overflow-hidden"
           >
-            {hasError ? (
+            {hasError || hasRunningNote ? (
               <div
                 id={`task-detail-${task.task_id}`}
                 className="mx-3 mb-1.5 rounded px-2 py-1.5 text-[10.5px]"
                 style={{
-                  background: "oklch(0.30 0.10 25 / 0.10)",
-                  color: "oklch(0.85 0.10 25)",
-                  border: "1px solid oklch(0.45 0.18 25 / 0.30)",
+                  background: hasRunningNote
+                    ? "oklch(0.35 0.06 250 / 0.10)"
+                    : "oklch(0.30 0.10 25 / 0.10)",
+                  color: hasRunningNote
+                    ? "oklch(0.82 0.06 250)"
+                    : "oklch(0.85 0.10 25)",
+                  border: hasRunningNote
+                    ? "1px solid oklch(0.50 0.08 250 / 0.30)"
+                    : "1px solid oklch(0.45 0.18 25 / 0.30)",
                 }}
               >
                 {task.error_message}

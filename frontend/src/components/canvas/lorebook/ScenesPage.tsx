@@ -10,6 +10,7 @@ import { useAppStore } from "@/stores/app-store";
 import { useScrollTarget } from "@/hooks/useScrollTarget";
 import { errMsg } from "@/utils/async";
 import type { Scene } from "@/types";
+import { collectMissingSceneSheetItems } from "@/utils/missing-asset-sheets";
 import { GalleryEmptyState } from "./GalleryEmptyState";
 
 interface Props {
@@ -17,6 +18,8 @@ interface Props {
   scenes: Record<string, Scene>;
   onUpdateScene: (name: string, updates: Partial<Scene>) => void;
   onGenerateScene: (name: string) => void;
+  onGenerateAllSheets?: () => void;
+  generateAllBusy?: boolean;
   onAddScene: (name: string, description: string) => Promise<void>;
   onRestoreSceneVersion?: () => Promise<void> | void;
   onRefreshProject?: () => Promise<unknown> | void;
@@ -25,7 +28,7 @@ interface Props {
   readOnly?: boolean;
 }
 
-export function ScenesPage({ projectName, scenes, onUpdateScene, onGenerateScene, onAddScene, onRestoreSceneVersion, onRefreshProject, generatingSceneNames, readOnly = false }: Props) {
+export function ScenesPage({ projectName, scenes, onUpdateScene, onGenerateScene, onGenerateAllSheets, generateAllBusy = false, onAddScene, onRestoreSceneVersion, onRefreshProject, generatingSceneNames, readOnly = false }: Props) {
   const { t } = useTranslation(["dashboard", "assets"]);
   const [adding, setAdding] = useState(false);
   const [picking, setPicking] = useState(false);
@@ -33,6 +36,7 @@ export function ScenesPage({ projectName, scenes, onUpdateScene, onGenerateScene
   useScrollTarget("scene");
 
   const entries = Object.entries(scenes);
+  const missingSheetCount = collectMissingSceneSheetItems(scenes).length;
 
   const handleImport = async (ids: string[]) => {
     try {
@@ -57,6 +61,9 @@ export function ScenesPage({ projectName, scenes, onUpdateScene, onGenerateScene
         count={entries.length}
         onAdd={readOnly ? undefined : () => setAdding(true)}
         onPickFromLibrary={readOnly ? undefined : () => setPicking(true)}
+        onGenerateAll={readOnly ? undefined : onGenerateAllSheets}
+        generateAllBusy={generateAllBusy}
+        generateAllDisabled={missingSheetCount === 0}
       />
       <div className="px-5 py-5">
         {entries.length === 0 ? (

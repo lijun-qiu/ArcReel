@@ -194,6 +194,15 @@ class TestUtterancesToDialogue:
             {"speaker": "王", "line": "嗯。"},
         ]
 
+    def test_utterances_to_dialogue_skips_inner_monologue(self):
+        """内心独白不进口型音轨（挂音色但不做说话口型）。"""
+        assert utterances_to_dialogue(
+            [
+                {"kind": "inner_monologue", "speaker": "姜月茴", "text": "他不会回来。"},
+                {"kind": "dialogue", "speaker": "王", "text": "走吧。"},
+            ]
+        ) == [{"speaker": "王", "line": "走吧。"}]
+
     def test_robust_to_dirty_data(self):
         # 非 list / 非 dict 元素 / 缺 kind / 全空一律跳过，不抛
         assert utterances_to_dialogue(None) == []

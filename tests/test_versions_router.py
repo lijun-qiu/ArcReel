@@ -732,6 +732,46 @@ class TestVersionsRouter:
             assert restore_resp.json()["current_version"] == 1
             assert any(item[0] == "character" for item in fake_pm.updated)
 
+    def test_delete_non_current_storyboard_version(self, monkeypatch, tmp_path):
+        project_path = tmp_path / "demo"
+        _write_minimal_project(project_path)
+        seed1 = project_path / "seed1.png"
+        seed2 = project_path / "seed2.png"
+        seed1.write_bytes(b"v1")
+        seed2.write_bytes(b"v2")
+        vm = VersionManager(project_path)
+        vm.add_version("storyboards", "E1S01", "first", source_file=seed1)
+        vm.add_version("storyboards", "E1S01", "second", source_file=seed2)
+        snapshot = project_path / vm.get_versions("storyboards", "E1S01")["versions"][0]["file"]
+        assert snapshot.is_file()
+
+        client, _ = _client(monkeypatch, tmp_path)
+        monkeypatch.setattr(versions, "get_version_manager", lambda _name: vm)
+        with client:
+            resp = client.delete("/api/v1/projects/demo/versions/storyboards/E1S01/1")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["success"] is True
+        assert body["deleted_version"] == 1
+        assert body["current_version"] == 2
+        assert not snapshot.exists()
+        assert [item["version"] for item in vm.get_versions("storyboards", "E1S01")["versions"]] == [2]
+
+    def test_delete_current_version_is_conflict(self, monkeypatch, tmp_path):
+        project_path = tmp_path / "demo"
+        _write_minimal_project(project_path)
+        seed = project_path / "seed.png"
+        seed.write_bytes(b"char")
+        vm = VersionManager(project_path)
+        version = vm.add_version("characters", "Alice", "only", source_file=seed)
+
+        client, _ = _client(monkeypatch, tmp_path)
+        monkeypatch.setattr(versions, "get_version_manager", lambda _name: vm)
+        with client:
+            resp = client.delete(f"/api/v1/projects/demo/versions/characters/Alice/{version}")
+        assert resp.status_code == 409
+        assert resp.json()["detail"]
+
     def test_manual_video_is_presentable_without_claiming_it_is_restorable(self, monkeypatch, tmp_path):
         client, _ = _client(monkeypatch, tmp_path)
 

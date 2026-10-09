@@ -19,6 +19,51 @@ def _marks(line: str) -> list[tuple[str, str]]:
     return [(mark.speaker, mark.text) for mark in line_speech_marks(line)]
 
 
+def _marks_kind(line: str) -> list[tuple[str, str, str]]:
+    return [(mark.kind, mark.speaker, mark.text) for mark in line_speech_marks(line)]
+
+
+def test_inner_monologue_tag_binds_character_voice_kind():
+    assert _marks_kind("@[张三%内心独白]{小时候的遗憾}") == [
+        ("inner_monologue", "张三", "小时候的遗憾"),
+    ]
+
+
+def test_inner_monologue_allows_optional_separator_like_dialogue():
+    assert _marks_kind("@[张三%内心独白] {心声}") == _marks_kind("@[张三%内心独白]：{心声}")
+    assert _marks_kind("@[张三%内心独白]{心声}") == [("inner_monologue", "张三", "心声")]
+
+
+def test_multi_character_inner_monologue_keeps_order():
+    assert _marks_kind("@[张三%内心独白]{他不懂}@[李四%内心独白]{她也不会懂}") == [
+        ("inner_monologue", "张三", "他不懂"),
+        ("inner_monologue", "李四", "她也不会懂"),
+    ]
+
+
+def test_bare_voiceover_stays_voiceover_beside_inner_monologue():
+    assert _marks_kind("@[张三%内心独白]{心声}{旁白仍走画外音}") == [
+        ("inner_monologue", "张三", "心声"),
+        ("voiceover", "", "旁白仍走画外音"),
+    ]
+
+
+def test_unknown_percent_tag_is_not_a_speech_mark():
+    """``%`` 后不是固定关键字时不绑说话人，也不降级成画外音。"""
+    assert _marks_kind("@[张三%旁白]{错}") == []
+    assert strip_speech_marks("@[张三%旁白]{错}") == "@[张三%旁白]{错}"
+
+
+def test_inner_monologue_speaker_does_not_enter_visual_mentions():
+    assert extract_mentions("@[张三] 望着蛋。@[张三%内心独白]{小时候的遗憾}") == ["张三"]
+
+
+def test_inner_monologue_with_look_still_uses_character_name_for_voice():
+    assert _marks_kind("@[张三@战损%内心独白]{心声}") == [
+        ("inner_monologue", "张三", "心声"),
+    ]
+
+
 # ── extract_mentions ────────────────────────────────────────
 
 

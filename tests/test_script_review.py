@@ -252,6 +252,43 @@ class TestDramaGateFlow:
         assert (await svc.get_state("demo", 1))["status"] == "confirmed"
 
     @pytest.mark.unit
+    async def test_auto_confirm_step1_virtually_confirms_without_fingerprint(self, tmp_path):
+        """auto_confirm_step1=True：正式 step1 无指纹也放行；关开关后回到待审；quarantine 仍阻塞。"""
+        pm = _make_project(tmp_path, "drama")
+        svc = ScriptReviewService(pm)
+        project_path = pm.get_project_path("demo")
+        _write_step1(pm, "drama", _drama_step1())
+
+        assert script_review.gate_blocks_step2(project_path, pm.load_project("demo"), 1) is True
+
+        def _enable_auto(p: dict) -> None:
+            p["auto_confirm_step1"] = True
+
+        pm.update_project("demo", _enable_auto)
+        project = pm.load_project("demo")
+        assert script_review.resolve_auto_confirm_step1(project) is True
+        assert script_review.review_status(project_path, project, 1) == "confirmed"
+        assert script_review.gate_blocks_step2(project_path, project, 1) is False
+        assert (await svc.get_state("demo", 1))["status"] == "confirmed"
+        assert script_review.stored_review(project, 1).get("fingerprint") is None
+
+        write_quarantine(
+            project_path,
+            1,
+            QUARANTINE_KIND_DRAMA_STEP1,
+            content={"title": "第一集", "scenes": []},
+            violations=[],
+        )
+        assert script_review.gate_blocks_step2(project_path, pm.load_project("demo"), 1) is True
+        clear_quarantine(project_path, 1, QUARANTINE_KIND_DRAMA_STEP1)
+
+        def _clear_auto(p: dict) -> None:
+            p.pop("auto_confirm_step1", None)
+
+        pm.update_project("demo", _clear_auto)
+        assert script_review.gate_blocks_step2(project_path, pm.load_project("demo"), 1) is True
+
+    @pytest.mark.unit
     async def test_editing_step1_after_confirm_repends(self, tmp_path):
         pm = _make_project(tmp_path, "drama")
         svc = ScriptReviewService(pm)

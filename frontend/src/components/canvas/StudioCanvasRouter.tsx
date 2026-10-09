@@ -18,7 +18,7 @@ import { DemoEpisodePlaceholder } from "@/onboarding/DemoEpisodePlaceholder";
 import { useAppStore } from "@/stores/app-store";
 import { useConfigStatusStore } from "@/stores/config-status-store";
 import { useCapabilitiesStore } from "@/stores/capabilities-store";
-import { useActiveResourceIds } from "@/stores/tasks-store";
+import { isResourceBusy, useActiveResourceIds } from "@/stores/tasks-store";
 import { useCurrentEpisode, EPISODE_ROUTE_PATH } from "@/hooks/useCurrentEpisode";
 import { TimelineCanvas } from "./timeline/TimelineCanvas";
 import { OverviewCanvas } from "./OverviewCanvas";
@@ -34,6 +34,7 @@ import { EpisodeSourceReview } from "./EpisodeSourceReview";
 import { WorkflowPanel } from "@/components/workflow/WorkflowPanel";
 import { API, NarratedVideoDurationError } from "@/api";
 import {
+  enqueueAssetSheetsBatch,
   enqueueCharacter,
   enqueueEpisodeNarration,
   enqueueGrid,
@@ -46,6 +47,11 @@ import {
 } from "@/actions/generation";
 import { buildEntityRevisionKey } from "@/utils/project-changes";
 import {
+  collectMissingCharacterSheetItems,
+  collectMissingPropSheetItems,
+  collectMissingSceneSheetItems,
+} from "@/utils/missing-asset-sheets";
+import {
   getProviderModels,
   getCustomProviderModels,
   lookupProjectVideoResolution,
@@ -56,6 +62,11 @@ import {
   useModelCapabilities,
 } from "@/hooks/useModelCapabilities";
 import { gridStoryboardEnabled, normalizeRoute } from "@/utils/generation-mode";
+import {
+  selectTimelineBatchTargets,
+  type EditorContentMode,
+  type TimelineBatchSelection,
+} from "@/utils/script-shape";
 import type {
   Scene,
   Prop,
@@ -177,6 +188,11 @@ export function StudioCanvasRouter() {
   const generatingSceneNames = useActiveResourceIds("scene", currentProjectName);
   const generatingPropNames = useActiveResourceIds("prop", currentProjectName);
   const generatingProductNames = useActiveResourceIds("product", currentProjectName);
+  const [generateAllSheetsBusy, setGenerateAllSheetsBusy] = useState({
+    character: false,
+    scene: false,
+    prop: false,
+  });
 
   // 刷新项目数据；返回本地 store 是否已同步成功，供调用方决定是否推进依赖新顺序的 UI 状态。
   // 在途合并 + 失败留旧收敛于 projects-store 的 refreshProject，此处仅表达意图。
@@ -351,6 +367,144 @@ export function StudioCanvasRouter() {
     }
   }, [currentProjectName, currentScripts, ensureAudioProviderConfigured]);
 
+  const editorModeForScript = useCallback((script: EpisodeScript): EditorContentMode => {
+    if (script.content_mode === "narration") return "narration";
+    if (script.content_mode === "ad") return "ad";
+    return "drama";
+  }, []);
+
+  const handleBatchStoryboards = useCallback(async (
+    selection: TimelineBatchSelection,
+    scriptFile?: string,
+  ) => {
+    if (!currentProjectName || !currentScripts) return;
+    const resolvedFile = scriptFile ?? Object.keys(currentScripts)[0];
+    if (!resolvedFile) return;
+    const script = currentScripts[resolvedFile];
+    if (!script || "video_units" in script) return;
+    const mode = editorModeForScript(script);
+    const targets = selectTimelineBatchTargets(script, mode, "storyboard", selection);
+    let queued = 0;
+    let skippedBusy = 0;
+    let failed = 0;
+    for (const segmentId of targets) {
+      if (isResourceBusy("storyboard", currentProjectName, segmentId)) {
+        skippedBusy += 1;
+        continue;
+      }
+      const resolved = resolveSegmentPrompt(currentScripts, segmentId, "image_prompt", resolvedFile);
+      if (!resolved) {
+        failed += 1;
+        continue;
+      }
+      try {
+        await enqueueStoryboard(
+          currentProjectName,
+          segmentId,
+          resolved.prompt as string | Record<string, unknown>,
+          resolved.resolvedFile,
+          { notify: false },
+        );
+        queued += 1;
+      } catch (err) {
+        failed += 1;
+        useAppStore.getState().pushToast(
+          tRef.current("generate_storyboard_failed", { message: errMsg(err) }),
+          "error",
+        );
+      }
+    }
+    if (queued > 0) {
+      useAppStore.getState().pushToast(
+        tRef.current("batch_storyboards_queued", { count: queued }),
+        "success",
+      );
+    } else if (targets.length === 0) {
+      useAppStore.getState().pushToast(tRef.current("batch_storyboards_none"), "info");
+    } else if (skippedBusy > 0 && failed === 0) {
+      useAppStore.getState().pushToast(tRef.current("batch_storyboards_none"), "info");
+    }
+  }, [currentProjectName, currentScripts, editorModeForScript]);
+
+  const handleBatchVideos = useCallback(async (
+    selection: TimelineBatchSelection,
+    scriptFile?: string,
+  ) => {
+    if (!currentProjectName || !currentScripts) return;
+    const resolvedFile = scriptFile ?? Object.keys(currentScripts)[0];
+    if (!resolvedFile) return;
+    const script = currentScripts[resolvedFile];
+    if (!script || "video_units" in script) return;
+    const mode = editorModeForScript(script);
+    const targets = selectTimelineBatchTargets(script, mode, "video", selection);
+    // Agnes 一 key 一路：单次批量最多 7 条，与参考视频批量同口径，避免一次塞满后撞 queue_full。
+    const TIMELINE_VIDEO_BATCH_MAX = 7;
+    const cappedTargets =
+      targets.length > TIMELINE_VIDEO_BATCH_MAX
+        ? targets.slice(0, TIMELINE_VIDEO_BATCH_MAX)
+        : targets;
+    const deferred = targets.length - cappedTargets.length;
+    let queued = 0;
+    let skippedBusy = 0;
+    let failed = 0;
+    for (const segmentId of cappedTargets) {
+      if (isResourceBusy("video", currentProjectName, segmentId)) {
+        skippedBusy += 1;
+        continue;
+      }
+      const resolved = resolveSegmentPrompt(currentScripts, segmentId, "video_prompt", resolvedFile);
+      if (!resolved) {
+        failed += 1;
+        continue;
+      }
+      try {
+        await enqueueVideo(
+          currentProjectName,
+          segmentId,
+          resolved.prompt as string | Record<string, unknown>,
+          resolved.resolvedFile,
+          resolved.duration,
+          { narration_delivery: "post_production", use_agnes_key_pool: true },
+          { notify: false },
+        );
+        queued += 1;
+      } catch (err) {
+        failed += 1;
+        if (err instanceof NarratedVideoDurationError) {
+          useAppStore.getState().pushToast(
+            tRef.current("workflow_regenerate_needs_confirmation"),
+            "error",
+          );
+          continue;
+        }
+        useAppStore.getState().pushToast(
+          tRef.current("generate_video_failed", { message: errMsg(err) }),
+          "error",
+        );
+      }
+    }
+    if (queued > 0) {
+      useAppStore.getState().pushToast(
+        tRef.current("batch_videos_queued", { count: queued }),
+        "success",
+      );
+      if (deferred > 0) {
+        useAppStore.getState().pushToast(
+          tRef.current("reference_batch_capped", {
+            max: TIMELINE_VIDEO_BATCH_MAX,
+            taken: queued,
+            deferred,
+          }),
+          "info",
+        );
+      }
+    } else if (targets.length === 0) {
+      useAppStore.getState().pushToast(tRef.current("batch_videos_none"), "info");
+    } else if (skippedBusy > 0 && failed === 0) {
+      useAppStore.getState().pushToast(tRef.current("batch_videos_none"), "info");
+    }
+  }, [currentProjectName, currentScripts, editorModeForScript]);
+
   // ---- Workflow panel callbacks ----
   // 面板只陈述状态，动作交回既有入口执行：跳转复用 Agent 定位用的同一条 scrollTarget 缝，
   // 重生复用本组件已有的入队回调。面板不自建播放器，也不自建入队路径。
@@ -461,6 +615,19 @@ export function StudioCanvasRouter() {
     }
   }, [currentProjectName, currentProjectData]);
 
+  const handleGenerateAllCharacterSheets = useCallback(async () => {
+    if (!currentProjectName) return;
+    const items = collectMissingCharacterSheetItems(currentProjectData?.characters ?? {});
+    setGenerateAllSheetsBusy((prev) => ({ ...prev, character: true }));
+    try {
+      await enqueueAssetSheetsBatch(currentProjectName, "character", items);
+    } catch (err) {
+      useAppStore.getState().pushToast(tRef.current("submit_failed", { message: errMsg(err) }), "error");
+    } finally {
+      setGenerateAllSheetsBusy((prev) => ({ ...prev, character: false }));
+    }
+  }, [currentProjectName, currentProjectData]);
+
   const handleAddCharacterSubmit = useCallback(async (
     name: string,
     description: string,
@@ -507,6 +674,19 @@ export function StudioCanvasRouter() {
     }
   }, [currentProjectName, currentProjectData]);
 
+  const handleGenerateAllSceneSheets = useCallback(async () => {
+    if (!currentProjectName) return;
+    const items = collectMissingSceneSheetItems(currentProjectData?.scenes ?? {});
+    setGenerateAllSheetsBusy((prev) => ({ ...prev, scene: true }));
+    try {
+      await enqueueAssetSheetsBatch(currentProjectName, "scene", items);
+    } catch (err) {
+      useAppStore.getState().pushToast(tRef.current("submit_failed", { message: errMsg(err) }), "error");
+    } finally {
+      setGenerateAllSheetsBusy((prev) => ({ ...prev, scene: false }));
+    }
+  }, [currentProjectName, currentProjectData]);
+
   const handleAddSceneSubmit = useCallback(async (name: string, description: string) => {
     if (!currentProjectName) return;
     try {
@@ -536,6 +716,19 @@ export function StudioCanvasRouter() {
       await enqueueProp(currentProjectName, name, currentProjectData?.props?.[name]?.description ?? "");
     } catch (err) {
       useAppStore.getState().pushToast(tRef.current("submit_failed", { message: errMsg(err) }), "error");
+    }
+  }, [currentProjectName, currentProjectData]);
+
+  const handleGenerateAllPropSheets = useCallback(async () => {
+    if (!currentProjectName) return;
+    const items = collectMissingPropSheetItems(currentProjectData?.props ?? {});
+    setGenerateAllSheetsBusy((prev) => ({ ...prev, prop: true }));
+    try {
+      await enqueueAssetSheetsBatch(currentProjectName, "prop", items);
+    } catch (err) {
+      useAppStore.getState().pushToast(tRef.current("submit_failed", { message: errMsg(err) }), "error");
+    } finally {
+      setGenerateAllSheetsBusy((prev) => ({ ...prev, prop: false }));
     }
   }, [currentProjectName, currentProjectData]);
 
@@ -603,18 +796,27 @@ export function StudioCanvasRouter() {
   const handleGenerateCharacterVoid = useCallback((...args: Parameters<typeof handleGenerateCharacter>) => {
     void handleGenerateCharacter(...args).catch(console.error);
   }, [handleGenerateCharacter]);
+  const handleGenerateAllCharacterSheetsVoid = useCallback(() => {
+    void handleGenerateAllCharacterSheets().catch(console.error);
+  }, [handleGenerateAllCharacterSheets]);
   const handleUpdateSceneVoid = useCallback((...args: Parameters<typeof handleUpdateScene>) => {
     void handleUpdateScene(...args).catch(console.error);
   }, [handleUpdateScene]);
   const handleGenerateSceneVoid = useCallback((...args: Parameters<typeof handleGenerateScene>) => {
     void handleGenerateScene(...args).catch(console.error);
   }, [handleGenerateScene]);
+  const handleGenerateAllSceneSheetsVoid = useCallback(() => {
+    void handleGenerateAllSceneSheets().catch(console.error);
+  }, [handleGenerateAllSceneSheets]);
   const handleUpdatePropVoid = useCallback((...args: Parameters<typeof handleUpdateProp>) => {
     void handleUpdateProp(...args).catch(console.error);
   }, [handleUpdateProp]);
   const handleGeneratePropVoid = useCallback((...args: Parameters<typeof handleGenerateProp>) => {
     void handleGenerateProp(...args).catch(console.error);
   }, [handleGenerateProp]);
+  const handleGenerateAllPropSheetsVoid = useCallback(() => {
+    void handleGenerateAllPropSheets().catch(console.error);
+  }, [handleGenerateAllPropSheets]);
   const handleUpdateProductVoid = useCallback((...args: Parameters<typeof handleUpdateProduct>) => {
     void handleUpdateProduct(...args).catch(console.error);
   }, [handleUpdateProduct]);
@@ -664,6 +866,8 @@ export function StudioCanvasRouter() {
           readOnly={demoMode}
           onSaveCharacter={handleSaveCharacter}
           onGenerateCharacter={handleGenerateCharacterVoid}
+          onGenerateAllSheets={handleGenerateAllCharacterSheetsVoid}
+          generateAllBusy={generateAllSheetsBusy.character}
           onAddCharacter={handleAddCharacterSubmit}
           onRestoreCharacterVersion={handleRestoreAsset}
           onRefreshProject={refreshProject}
@@ -679,6 +883,8 @@ export function StudioCanvasRouter() {
           readOnly={demoMode}
           onUpdateScene={handleUpdateSceneVoid}
           onGenerateScene={handleGenerateSceneVoid}
+          onGenerateAllSheets={handleGenerateAllSceneSheetsVoid}
+          generateAllBusy={generateAllSheetsBusy.scene}
           onAddScene={handleAddSceneSubmit}
           onRestoreSceneVersion={handleRestoreAsset}
           onRefreshProject={refreshProject}
@@ -694,6 +900,8 @@ export function StudioCanvasRouter() {
           readOnly={demoMode}
           onUpdateProp={handleUpdatePropVoid}
           onGenerateProp={handleGeneratePropVoid}
+          onGenerateAllSheets={handleGenerateAllPropSheetsVoid}
+          generateAllBusy={generateAllSheetsBusy.prop}
           onAddProp={handleAddPropSubmit}
           onRestorePropVersion={handleRestoreAsset}
           onRefreshProject={refreshProject}
@@ -861,6 +1069,8 @@ export function StudioCanvasRouter() {
                     onGenerateVideo={handleGenerateVideo}
                     onGenerateNarration={voidPromise(handleGenerateNarration)}
                     onGenerateEpisodeNarration={voidPromise(handleGenerateEpisodeNarration)}
+                    onBatchStoryboards={handleBatchStoryboards}
+                    onBatchVideos={handleBatchVideos}
                     onRestoreStoryboard={handleRestoreAsset}
                     onRestoreVideo={handleRestoreAsset}
                   />

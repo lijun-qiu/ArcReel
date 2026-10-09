@@ -1,11 +1,14 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Sparkles } from "lucide-react";
 import { useTranslation } from "react-i18next";
+import { API } from "@/api";
 import { ScriptReviewGate } from "./ScriptReviewGate";
 import { ShotSplitView } from "./ShotSplitView";
 import { EpisodeHeader } from "./EpisodeHeader";
+import { useAppStore } from "@/stores/app-store";
 import { useCostStore } from "@/stores/cost-store";
 import { useActiveResourceIds } from "@/stores/tasks-store";
+import { errMsg } from "@/utils/async";
 import { getScriptItemId, sumItemDuration } from "@/utils/script-shape";
 import { ONBOARDING_ANCHORS } from "@/onboarding/anchors";
 import { useDemoWorkbench } from "@/onboarding/use-demo-workbench";
@@ -48,6 +51,10 @@ interface TimelineCanvasProps {
   ) => void | Promise<void>;
   onGenerateNarration?: (segmentId: string, scriptFile?: string) => void;
   onGenerateEpisodeNarration?: (scriptFile?: string) => void;
+  /** 批量生成分镜图（含已有重做）或补全（只缺的）。 */
+  onBatchStoryboards?: (mode: "all" | "missing", scriptFile?: string) => void | Promise<void>;
+  /** 批量生成视频（含已有重做）或补全（只缺的）。 */
+  onBatchVideos?: (mode: "all" | "missing", scriptFile?: string) => void | Promise<void>;
   durationOptions?: number[];
   /** 已保存时长越界的成因判定；缺省时 ShotDetail 退回不区分成因的通用警告文案。 */
   durationWarningReason?: (seconds: number) => DurationOutOfRangeReason | null;
@@ -66,6 +73,8 @@ const DEMO_READ_ONLY_PROPS = {
   onMoveShot: undefined,
   onGenerateNarration: undefined,
   onGenerateEpisodeNarration: undefined,
+  onBatchStoryboards: undefined,
+  onBatchVideos: undefined,
   onSaveTitle: undefined,
   canEditTitle: false,
 } as const satisfies Partial<TimelineCanvasProps>;
@@ -89,6 +98,8 @@ export function TimelineCanvas(props: TimelineCanvasProps) {
     onGenerateVideo,
     onGenerateNarration,
     onGenerateEpisodeNarration,
+    onBatchStoryboards,
+    onBatchVideos,
     onRestoreStoryboard,
     onRestoreVideo,
     onSaveTitle,
@@ -177,6 +188,207 @@ export function TimelineCanvas(props: TimelineCanvasProps) {
     () => [...currentSegmentIds].some((id) => ttsBusyIds.has(id)),
     [ttsBusyIds, currentSegmentIds],
   );
+  const storyboardBatchBusy = useMemo(
+    () => [...currentSegmentIds].some((id) => storyboardBusyIds.has(id)),
+    [storyboardBusyIds, currentSegmentIds],
+  );
+  const videoBatchBusy = useMemo(
+    () => [...currentSegmentIds].some((id) => videoBusyIds.has(id)),
+    [videoBusyIds, currentSegmentIds],
+  );
+  const [batchSubmitting, setBatchSubmitting] = useState<"storyboard" | "video" | null>(null);
+
+  const [episodePreviewUrl, setEpisodePreviewUrl] = useState<string | null>(null);
+  const [episodeUpscaledUrl, setEpisodeUpscaledUrl] = useState<string | null>(null);
+  const [episodePreviewSubtitlesWebvtt, setEpisodePreviewSubtitlesWebvtt] = useState<string | null>(
+    null,
+  );
+  const [episodePreviewSubtitles, setEpisodePreviewSubtitles] = useState<
+    Array<{ start_microseconds: number; duration_microseconds: number; text: string }>
+  >([]);
+
+  useEffect(() => {
+    if (!hasScript) {
+      setEpisodePreviewUrl(null);
+      setEpisodeUpscaledUrl(null);
+      setEpisodePreviewSubtitlesWebvtt(null);
+      setEpisodePreviewSubtitles([]);
+      return;
+    }
+    const controller = new AbortController();
+    void (async () => {
+      try {
+        const res = await API.getEpisodePreview(projectName, episode, {
+          signal: controller.signal,
+        });
+        if (controller.signal.aborted) return;
+        setEpisodePreviewUrl(
+          res.exists && res.url ? `${res.url}?v=${res.revision ?? Date.now()}` : null,
+        );
+        setEpisodeUpscaledUrl(
+          res.upscaled_exists && res.upscaled_url
+            ? `${res.upscaled_url}?v=${res.upscaled_revision ?? Date.now()}`
+            : null,
+        );
+        setEpisodePreviewSubtitlesWebvtt(res.subtitles_webvtt ?? null);
+        setEpisodePreviewSubtitles(res.subtitles ?? []);
+      } catch {
+        if (controller.signal.aborted) return;
+        setEpisodePreviewUrl(null);
+        setEpisodeUpscaledUrl(null);
+        setEpisodePreviewSubtitlesWebvtt(null);
+        setEpisodePreviewSubtitles([]);
+      }
+    })();
+    return () => controller.abort();
+  }, [hasScript, projectName, episode]);
+
+  const canComposePreview = useMemo(() => {
+    if (segments.length === 0) return false;
+    return segments.every((seg) => Boolean(seg.generated_assets?.video_clip));
+  }, [segments]);
+
+  const handleComposePreview = useCallback(async () => {
+    try {
+      const result = await API.composeEpisodePreview(projectName, episode);
+      const busted = `${result.url}?v=${result.revision ?? Date.now()}`;
+      setEpisodePreviewUrl(busted);
+      setEpisodeUpscaledUrl(
+        result.upscaled_exists && result.upscaled_url
+          ? `${result.upscaled_url}?v=${result.upscaled_revision ?? Date.now()}`
+          : null,
+      );
+      setEpisodePreviewSubtitlesWebvtt(result.subtitles_webvtt ?? null);
+      setEpisodePreviewSubtitles(result.subtitles ?? []);
+      useAppStore.getState().pushToast(t("reference_episode_compose_preview_success"), "success");
+      return {
+        url: result.url,
+        revision: result.revision,
+        subtitles_webvtt: result.subtitles_webvtt,
+        subtitles: result.subtitles,
+      };
+    } catch (error) {
+      useAppStore.getState().pushToast(
+        t("reference_episode_compose_preview_failed", { error: errMsg(error) }),
+        "error",
+      );
+      throw error;
+    }
+  }, [episode, projectName, t]);
+
+  const handleUpscalePreview = useCallback(async () => {
+    try {
+      try {
+        await API.ensureRealEsrgan();
+      } catch {
+        // ensure is best-effort; upscale surfaces unreachable errors.
+      }
+      const result = await API.upscaleEpisodePreview(projectName, episode);
+      setEpisodePreviewUrl(result.url ? `${result.url}?v=${result.revision ?? Date.now()}` : null);
+      const upUrl = result.upscaled_url;
+      const upBusted = upUrl ? `${upUrl}?v=${result.upscaled_revision ?? Date.now()}` : null;
+      setEpisodeUpscaledUrl(upBusted);
+      setEpisodePreviewSubtitlesWebvtt(result.subtitles_webvtt ?? null);
+      setEpisodePreviewSubtitles(result.subtitles ?? []);
+      useAppStore.getState().pushToast(t("reference_episode_upscale_preview_success"), "success");
+      return {
+        url: upBusted ?? `${result.url}?v=${result.revision ?? Date.now()}`,
+        revision: result.upscaled_revision ?? result.revision,
+        subtitles_webvtt: result.subtitles_webvtt,
+        subtitles: result.subtitles,
+      };
+    } catch (error) {
+      useAppStore.getState().pushToast(
+        t("reference_episode_upscale_preview_failed", { error: errMsg(error) }),
+        "error",
+      );
+      throw error;
+    }
+  }, [episode, projectName, t]);
+
+  const handleWatchEpisodePreview = useCallback(async () => {
+    try {
+      const res = await API.getEpisodePreview(projectName, episode);
+      if (!res.exists || !res.url) {
+        useAppStore.getState().pushToast(t("reference_episode_watch_preview_disabled"), "error");
+        return null;
+      }
+      const busted = `${res.url}?v=${res.revision ?? Date.now()}`;
+      setEpisodePreviewUrl(busted);
+      setEpisodeUpscaledUrl(
+        res.upscaled_exists && res.upscaled_url
+          ? `${res.upscaled_url}?v=${res.upscaled_revision ?? Date.now()}`
+          : null,
+      );
+      setEpisodePreviewSubtitlesWebvtt(res.subtitles_webvtt ?? null);
+      setEpisodePreviewSubtitles(res.subtitles ?? []);
+      return {
+        url: busted,
+        subtitles_webvtt: res.subtitles_webvtt,
+        subtitles: res.subtitles,
+      };
+    } catch (error) {
+      useAppStore.getState().pushToast(
+        t("reference_episode_compose_preview_failed", { error: errMsg(error) }),
+        "error",
+      );
+      return null;
+    }
+  }, [episode, projectName, t]);
+
+  const handleWatchUpscaledPreview = useCallback(async () => {
+    try {
+      const res = await API.getEpisodePreview(projectName, episode);
+      if (!res.upscaled_exists || !res.upscaled_url) {
+        useAppStore.getState().pushToast(t("reference_episode_watch_upscaled_disabled"), "error");
+        return null;
+      }
+      const busted = `${res.upscaled_url}?v=${res.upscaled_revision ?? Date.now()}`;
+      setEpisodeUpscaledUrl(busted);
+      if (res.exists && res.url) {
+        setEpisodePreviewUrl(`${res.url}?v=${res.revision ?? Date.now()}`);
+      }
+      setEpisodePreviewSubtitlesWebvtt(res.subtitles_webvtt ?? null);
+      setEpisodePreviewSubtitles(res.subtitles ?? []);
+      return {
+        url: busted,
+        subtitles_webvtt: res.subtitles_webvtt,
+        subtitles: res.subtitles,
+      };
+    } catch (error) {
+      useAppStore.getState().pushToast(
+        t("reference_episode_upscale_preview_failed", { error: errMsg(error) }),
+        "error",
+      );
+      return null;
+    }
+  }, [episode, projectName, t]);
+
+  const runBatchStoryboards = useCallback(
+    async (mode: "all" | "missing") => {
+      if (!onBatchStoryboards || batchSubmitting) return;
+      setBatchSubmitting("storyboard");
+      try {
+        await onBatchStoryboards(mode, scriptFile);
+      } finally {
+        setBatchSubmitting(null);
+      }
+    },
+    [onBatchStoryboards, batchSubmitting, scriptFile],
+  );
+
+  const runBatchVideos = useCallback(
+    async (mode: "all" | "missing") => {
+      if (!onBatchVideos || batchSubmitting) return;
+      setBatchSubmitting("video");
+      try {
+        await onBatchVideos(mode, scriptFile);
+      } finally {
+        setBatchSubmitting(null);
+      }
+    },
+    [onBatchVideos, batchSubmitting, scriptFile],
+  );
 
   if (!projectData || (!episodeScript && !hasDraft)) {
     return (
@@ -233,6 +445,15 @@ export function TimelineCanvas(props: TimelineCanvasProps) {
         episodeCost={episodeCost ?? undefined}
         onSaveTitle={onSaveTitle}
         canEditTitle={canEditTitle}
+        canComposePreview={canComposePreview}
+        onComposePreview={demoReadOnly ? undefined : handleComposePreview}
+        onUpscalePreview={demoReadOnly ? undefined : handleUpscalePreview}
+        onWatchPreview={handleWatchEpisodePreview}
+        onWatchUpscaled={handleWatchUpscaledPreview}
+        episodePreviewUrl={episodePreviewUrl}
+        episodeUpscaledUrl={episodeUpscaledUrl}
+        episodePreviewSubtitlesWebvtt={episodePreviewSubtitlesWebvtt}
+        episodePreviewSubtitles={episodePreviewSubtitles}
       />
 
       {/* Tab bar + 批量按钮 */}
@@ -292,29 +513,65 @@ export function TimelineCanvas(props: TimelineCanvasProps) {
 
         {activeTab === "timeline" && hasScript && (
           <div className="mr-1 inline-flex items-center gap-1.5">
-            <button
-              type="button"
-              className="sv-navbtn inline-flex items-center gap-1.5"
-              disabled
-              title={t("batch_generate_storyboards")}
-            >
-              <Sparkles className="h-3 w-3" />
-              <span>{t("batch_generate_storyboards")}</span>
-            </button>
-            <button
-              type="button"
-              className="sv-navbtn inline-flex items-center gap-1.5"
-              disabled
-              title={t("batch_generate_videos")}
-            >
-              <Sparkles className="h-3 w-3" />
-              <span>{t("batch_generate_videos")}</span>
-            </button>
+            {onBatchStoryboards && (
+              <>
+                <button
+                  type="button"
+                  className="sv-navbtn inline-flex items-center gap-1.5"
+                  disabled={Boolean(batchSubmitting) || storyboardBatchBusy}
+                  onClick={() => void runBatchStoryboards("all")}
+                  title={t("batch_generate_storyboards")}
+                >
+                  <Sparkles className="h-3 w-3" />
+                  <span>
+                    {batchSubmitting === "storyboard"
+                      ? t("submitting")
+                      : t("batch_generate_storyboards")}
+                  </span>
+                </button>
+                <button
+                  type="button"
+                  className="sv-navbtn inline-flex items-center gap-1.5"
+                  disabled={Boolean(batchSubmitting) || storyboardBatchBusy}
+                  onClick={() => void runBatchStoryboards("missing")}
+                  title={t("batch_fill_storyboards")}
+                >
+                  <Sparkles className="h-3 w-3" />
+                  <span>{t("batch_fill_storyboards")}</span>
+                </button>
+              </>
+            )}
+            {onBatchVideos && (
+              <>
+                <button
+                  type="button"
+                  className="sv-navbtn inline-flex items-center gap-1.5"
+                  disabled={Boolean(batchSubmitting) || videoBatchBusy}
+                  onClick={() => void runBatchVideos("all")}
+                  title={t("batch_generate_videos")}
+                >
+                  <Sparkles className="h-3 w-3" />
+                  <span>
+                    {batchSubmitting === "video" ? t("submitting") : t("batch_generate_videos")}
+                  </span>
+                </button>
+                <button
+                  type="button"
+                  className="sv-navbtn inline-flex items-center gap-1.5"
+                  disabled={Boolean(batchSubmitting) || videoBatchBusy}
+                  onClick={() => void runBatchVideos("missing")}
+                  title={t("batch_fill_videos")}
+                >
+                  <Sparkles className="h-3 w-3" />
+                  <span>{t("batch_fill_videos")}</span>
+                </button>
+              </>
+            )}
             {contentMode === "narration" && onGenerateEpisodeNarration && (
               <button
                 type="button"
                 className="sv-navbtn inline-flex items-center gap-1.5"
-                disabled={narrationBatchBusy}
+                disabled={narrationBatchBusy || Boolean(batchSubmitting)}
                 onClick={() => onGenerateEpisodeNarration(scriptFile)}
                 title={t("batch_generate_narration")}
               >

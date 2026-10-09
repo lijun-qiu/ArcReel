@@ -14,10 +14,12 @@ from pathlib import Path
 import pytest
 
 from lib.draft_quarantine import (
+    MAX_PROMOTE_ATTEMPTS,
     QUARANTINE_KIND_DRAMA_STEP1,
     QUARANTINE_KIND_STEP1,
     QUARANTINE_KIND_STEP2,
     clear_quarantine,
+    quarantine_and_report,
     quarantine_exists,
     quarantine_path,
     read_quarantine,
@@ -144,7 +146,8 @@ class TestReport:
         assert str(path) in text
         assert "content.units[i].text" in text
         assert 'validate_and_promote_draft({"episode": 2})' in text
-        assert "无轮次上限" in text
+        assert "最多 5 次" in text
+        assert "无轮次上限" not in text
 
     def test_report_numbers_each_violation_with_its_class(self):
         text = render_violation_report([_violation("unregistered_asset"), _violation("too_many_shots", "unit E1U02")])
@@ -175,6 +178,30 @@ class TestReport:
         text = render_report(tmp_path / "d.json", QUARANTINE_KIND_STEP2, [_violation()], episode=1)
         assert "content.units[i].text" in text
         assert "source_text" not in text
+
+    def test_promote_attempt_stops_at_five(self, tmp_path: Path):
+        """晋升未通过记次数；第 5 次起报告要求停止，不再指示继续晋升。"""
+        meta: dict = {"source": "source/episode_1.txt"}
+        last = ""
+        for _ in range(MAX_PROMOTE_ATTEMPTS):
+            last = quarantine_and_report(
+                tmp_path,
+                1,
+                QUARANTINE_KIND_STEP1,
+                content={"units": []},
+                violations=[_violation()],
+                meta=meta,
+                count_promote=True,
+            )
+            saved = read_quarantine(tmp_path, 1, QUARANTINE_KIND_STEP1)
+            assert saved is not None
+            meta = saved.meta
+            assert meta["source"] == "source/episode_1.txt"
+        assert meta["promote_attempts"] == MAX_PROMOTE_ATTEMPTS
+        assert "已达 5 次上限" in last
+        assert "停止调用晋升工具" in last
+        assert "还可再晋升" not in last
+        assert "validate_and_promote_draft" not in last
 
     def test_entries_carry_class_and_locator(self):
         assert violation_entries([_violation("blank_shot", "unit E2U07")]) == [

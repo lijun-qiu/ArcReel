@@ -28,9 +28,10 @@ MESSAGES: dict[str, str] = {
     "provider_desc_kling": "Kuaishou Kling video and image generation platform. API Key authentication works with all models; Access Key + Secret Key (JWT) only supports 3.0-and-earlier models. Choose either — when both are set, API Key takes priority.",
     "provider_desc_agnes": "Agnes multimodal platform (OpenAI-style), authenticated with a Bearer API key; currently supports image, text and video generation.",
     "provider_desc_openrouter": "OpenRouter free text models via a local key-injector proxy (127.0.0.1:9999); client key is openrouter_proxy_injector_api_key.",
-    "provider_desc_modelscope": "ModelScope API-Inference free text via a local injector proxy (127.0.0.1:10001); client key is modelscope_proxy_api_key.",
+    "provider_desc_modelscope": "ModelScope API-Inference free text (DeepSeek / Zhipu GLM) via a local key-injector proxy (127.0.0.1:10001); client key is modelscope_proxy_api_key. Put real ms-* keys in the proxy .env.modelscope.",
     # Agent preset notes (lib/agent_provider_catalog.py)
     "preset_notes_deepseek": "DeepSeek official Anthropic-compat endpoint; needs sk- prefixed key.",
+    "preset_notes_modelscope": "ModelScope Agent uses the local key-injector proxy (default 127.0.0.1:10001). Client key: modelscope_proxy_api_key; real ms-* keys live in openrouter-proxy-injector .env.modelscope.",
     "preset_notes_agnes": "Agnes Anthropic-compatible Messages API (apihub); use the same Bearer/sk key as image/video.",
     "preset_notes_xiaomi_mimo": "Xiaomi MiMo only accepts known model names; no public model list.",
     "preset_notes_ark_coding_plan": "Volcengine Ark Coding Plan",

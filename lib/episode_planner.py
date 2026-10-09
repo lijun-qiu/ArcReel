@@ -9,22 +9,24 @@ plan() 从 planning_cursor 起取一个源文窗口，由文本模型一次规�
 写入阶段在同一把项目锁内完成：写账本 + 按账本重写派生集文件 + 清理账本之外
 的残留派生文件（含余文文件），下游读到的 ``source/episode_N.txt`` 永远与账本
 一致。窗口字数与每批集数上限为内部默认，project.json 顶层
-``planning_window_chars`` / ``planning_max_episodes`` 可覆盖。新提交的集号若
-在磁盘上已有下游产物（该集实际已被消费过，见重置+重新规划场景），标 stale
-而非直接覆盖状态，产物不删除。
+``planning_window_chars`` / ``planning_max_episodes`` 可覆盖；每批上限同时写入
+结构化输出 schema 的 ``maxItems``，支持约束解码的供应商在生成层卡死集数。
+新提交的集号若在磁盘上已有下游产物（该集实际已被消费过，见重置+重新规划场景），
+标 stale 而非直接覆盖状态，产物不删除。
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import re
 import statistics
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, create_model
 
 from lib import script_review
 from lib.episode_ledger import (
@@ -59,8 +61,96 @@ from lib.text_utils import strip_json_code_fences
 logger = logging.getLogger(__name__)
 
 # 窗口/批量内部默认值；project.json 顶层同名字段可覆盖
-DEFAULT_PLANNING_WINDOW_CHARS = 30000
+DEFAULT_PLANNING_WINDOW_CHARS = 20000
 DEFAULT_PLANNING_MAX_EPISODES = 20
+
+# 分集切分模式：llm（默认）| markers（按「第N集/章/回/…」或「场景N」标题行规则切，不调文本模型）
+PLANNING_SPLIT_MODE_LLM = "llm"
+PLANNING_SPLIT_MODE_MARKERS = "markers"
+VALID_PLANNING_SPLIT_MODES = frozenset({PLANNING_SPLIT_MODE_LLM, PLANNING_SPLIT_MODE_MARKERS})
+
+# 作者分集/分章标题行：Markdown 或纯「第N集|章|回|节|卷」；序号支持阿拉伯数字或常见中文数字。
+# 分隔只用同行空白，避免 ``\s`` 吞掉换行把下一行正文吃进标题。
+_CN_DIGIT_CHARS = "一二三四五六七八九十百千零〇两"
+# 行首装饰：Markdown AT（#…）或加粗/斜体（* / ** / ***）；二者择一。
+# 两种正文形态：
+#   第N集/章/回/节/卷 …
+#   场景N …（剧本场次，无「第」前缀）
+# 行尾可带闭合 *；副标题落在最后一组。
+_EPISODE_MARKER_RE = re.compile(
+    rf"^(?:#{{1,6}}[ \t]*|\*{{1,3}}[ \t]*)?"
+    rf"(?:"
+    rf"第[ \t]*(\d+|[{_CN_DIGIT_CHARS}]+)[ \t]*(集|章|回|节|卷)"
+    rf"|场景[ \t]*(\d+|[{_CN_DIGIT_CHARS}]+)"
+    rf")"
+    r"(?:[ \t]*[：:\-—][ \t]*|[ \t]+)?(.*?)(?:\*{1,3})?[ \t]*$",
+    re.MULTILINE,
+)
+_CN_DIGITS = {
+    "零": 0,
+    "〇": 0,
+    "一": 1,
+    "二": 2,
+    "两": 2,
+    "三": 3,
+    "四": 4,
+    "五": 5,
+    "六": 6,
+    "七": 7,
+    "八": 8,
+    "九": 9,
+}
+_CN_UNITS = {"十": 10, "百": 100, "千": 1000}
+# 本集内显式集尾钩子字段（作者剧本常见写法）
+_HOOK_FIELD_RE = re.compile(
+    r"\*\*集尾钩子\*\*[：:]\s*(.+?)(?=\n\s*\n|\n【本集完】|\n---+|\Z)",
+    re.DOTALL,
+)
+
+
+def parse_marker_number(raw: str) -> int:
+    """解析标记序号：阿拉伯数字或常见中文数字（如「十一」「二十三」）。"""
+    s = raw.strip()
+    if not s:
+        raise ValueError("empty marker number")
+    if s.isdigit():
+        return int(s)
+    total = 0
+    current = 0
+    for ch in s:
+        digit = _CN_DIGITS.get(ch)
+        if digit is not None:
+            current = digit
+            continue
+        unit = _CN_UNITS.get(ch)
+        if unit is not None:
+            if current == 0:
+                current = 1
+            total += current * unit
+            current = 0
+            continue
+        raise ValueError(f"invalid marker number: {raw!r}")
+    return total + current
+
+
+def _is_marker_heading_line(stripped: str) -> bool:
+    """判断是否为分集标记标题行（用于钩子提取时跳过）。"""
+    return _EPISODE_MARKER_RE.match(stripped) is not None
+
+
+def _marker_match_parts(match: re.Match[str]) -> tuple[int, str, str]:
+    """从标记匹配取出 (作者序号, 单位词, 副标题)。
+
+    ``第N集`` 走 group(1)/group(2)；``场景N`` 走 group(3)，单位固定为「场景」。
+    """
+    if match.group(1) is not None:
+        author_num = parse_marker_number(match.group(1))
+        unit = match.group(2) or ""
+    else:
+        author_num = parse_marker_number(match.group(3) or "")
+        unit = "场景"
+    subtitle = (match.group(4) or "").strip().strip("*").strip()
+    return author_num, unit, subtitle
 
 # LLM 输出未通过 schema / 机械校验时的总尝试次数（含首次）
 _MAX_PLAN_ATTEMPTS = 3
@@ -146,15 +236,36 @@ class DramaEpisodeDraft(NarrationEpisodeDraft):
 
 
 class NarrationPlanDraft(BaseModel):
+    """无集数上限的 narration 草稿骨架；规划调用走 :func:`_plan_draft_model` 动态封顶。"""
+
     model_config = _DRAFT_CONFIG
 
     episodes: list[NarrationEpisodeDraft] = Field(min_length=1)
 
 
 class DramaPlanDraft(BaseModel):
+    """无集数上限的 drama 草稿骨架；规划调用走 :func:`_plan_draft_model` 动态封顶。"""
+
     model_config = _DRAFT_CONFIG
 
     episodes: list[DramaEpisodeDraft] = Field(min_length=1)
+
+
+def _plan_draft_model(content_mode: str, max_episodes: int) -> type[BaseModel]:
+    """按本批 ``max_episodes`` 构造带 ``maxItems`` 的规划草稿 schema。
+
+    写入 response_schema 后，支持约束解码的供应商在生成层即卡死集数；本地
+    ``model_validate`` 同样拒绝超限输出（超限走校验重试，不再依赖事后截断省 token）。
+    """
+    if max_episodes < 1:
+        raise ValueError(f"max_episodes 须 >= 1，得到 {max_episodes}")
+    item_model: type[BaseModel] = DramaEpisodeDraft if content_mode == "drama" else NarrationEpisodeDraft
+    name = "DramaPlanDraft" if content_mode == "drama" else "NarrationPlanDraft"
+    return create_model(
+        name,
+        __config__=_DRAFT_CONFIG,
+        episodes=(list[item_model], Field(min_length=1, max_length=max_episodes)),
+    )
 
 
 class _DraftRejected(Exception):
@@ -352,7 +463,7 @@ def _missing_source_range_error(nums: list[int]) -> EpisodePlanningError:
     return EpisodePlanningError(
         f"账本中第 {listed} 没有原文范围记录（source_range），无法据此续接规划——这类条目的物理集文件"
         "就是它们的最终记录，既无法重造也无法确定下一批的起点；请先调用 reset_episode_planning 做"
-        "全量重置（这些集的集文件会改名留底、下游产物不删），再重新规划。"
+        "全量重置（这些集的集文件会改名留底、剧本会删除、step1/媒体保留），再重新规划。"
     )
 
 
@@ -384,6 +495,95 @@ _PLAN_DRAMA_OUTLINE_SCREENPLAY: str = (
     "与 next_episode_teaser（下集预告语；最后一集若后续未知可为 null）；"
     "剧本已写明本集节点 / 下集预告时照搬其原文，未写明再自行提炼。"
 )
+
+
+@dataclass(frozen=True)
+class _MarkerEpisodeSlice:
+    """规则切分得到的一集：作者标记集号（仅日志）、标题、正文相对范围、钩子。"""
+
+    author_num: int
+    title: str
+    body_start: int  # 相对剩余文本（含标题行之后）
+    body_end: int
+    hook: str
+
+
+def resolve_planning_split_mode(project: Mapping[str, Any]) -> str:
+    """读取项目切分模式；非法/缺省回退 llm。"""
+    value = project.get("planning_split_mode")
+    if isinstance(value, str) and value in VALID_PLANNING_SPLIT_MODES:
+        return value
+    if value is not None:
+        logger.warning("项目设置 planning_split_mode=%r 非法，回退 %s", value, PLANNING_SPLIT_MODE_LLM)
+    return PLANNING_SPLIT_MODE_LLM
+
+
+def _extract_hook_from_body(body: str) -> str:
+    """从集正文提取钩子：优先 ``**集尾钩子**`` 字段，否则取末段非空行。"""
+    match = _HOOK_FIELD_RE.search(body)
+    if match:
+        hook = match.group(1).strip()
+        if hook:
+            return hook
+    for line in reversed(body.splitlines()):
+        stripped = line.strip()
+        if not stripped or stripped in {"---", "【本集完】"}:
+            continue
+        if _is_marker_heading_line(stripped):
+            continue
+        if stripped.startswith("**集尾钩子**"):
+            continue
+        return stripped[:200] if len(stripped) > 200 else stripped
+    return "（按作者分集标记切分）"
+
+
+def find_marker_episode_slices(text: str) -> list[_MarkerEpisodeSlice]:
+    """按「第N集/章/回/节/卷」或「场景N」标题行切出各集范围（相对 ``text`` 坐标）。
+
+    行首允许 Markdown ``#`` 标题或 ``*`` / ``**`` 加粗装饰。
+    """
+    matches = list(_EPISODE_MARKER_RE.finditer(text))
+    if not matches:
+        return []
+    author_nums = [_marker_match_parts(m)[0] for m in matches]
+    if author_nums != list(range(author_nums[0], author_nums[0] + len(author_nums))):
+        logger.warning("作者分集标记集号不连续：%s；账本将按出现顺序重编号", author_nums)
+
+    slices: list[_MarkerEpisodeSlice] = []
+    for idx, match in enumerate(matches):
+        author_num, unit, subtitle = _marker_match_parts(match)
+        if subtitle:
+            title = subtitle
+        elif unit == "场景":
+            title = f"场景{author_num}"
+        else:
+            title = f"第{author_num}{unit}"
+        # 正文从标题行下一字符起（通常是换行后）
+        body_start = match.end()
+        if body_start < len(text) and text[body_start] == "\n":
+            body_start += 1
+        body_end = matches[idx + 1].start() if idx + 1 < len(matches) else len(text)
+        # 去掉集尾仅空白，但保留至少一个字符宽度给空集防御
+        while body_end > body_start and text[body_end - 1] in "\r\n":
+            # 不把内容空白全部剥掉：只收掉标题之间多余空行的尾部换行，留给下一集标题前的分隔
+            if body_end - 1 > body_start and text[body_end - 1] == "\n":
+                body_end -= 1
+            else:
+                break
+        if body_end < body_start:
+            body_end = body_start
+        body = text[body_start:body_end]
+        hook = _extract_hook_from_body(body)
+        slices.append(
+            _MarkerEpisodeSlice(
+                author_num=author_num,
+                title=title,
+                body_start=body_start,
+                body_end=body_end,
+                hook=hook,
+            )
+        )
+    return slices
 
 
 class EpisodePlanner:
@@ -484,7 +684,7 @@ class EpisodePlanner:
         window = text[start:window_end]
         window_is_final = window_end >= len(text)
         content_mode = str(project.get("content_mode") or "narration")
-        draft_model: type[BaseModel] = DramaPlanDraft if content_mode == "drama" else NarrationPlanDraft
+        draft_model = _plan_draft_model(content_mode, max_episodes)
         language = _language_of(project)
         # 全局进度仅在有 instructions 时算、仅在有 instructions 时注入 prompt：
         # 无指令路径的 prompt 必须逐字保持不变：分批规划要求同一批次内的无意见路径行为可复现，
@@ -596,6 +796,162 @@ class EpisodePlanner:
             total_planned=_count_planned_episodes(final_project),
             # 全局核对材料只在末批即耗尽时附上；常规批次只报「累计已规划 N 集」，
             # 避免主 agent 上下文被逐批膨胀（工具层渲染 total_planned 的那一行）
+            ledger_stats=self._compute_ledger_stats(final_project) if exhausted else None,
+        )
+
+    def plan_by_markers(self) -> PlanResult:
+        """按作者「第N集/章/回/节/卷」或「场景N」标题行规则切分当前源文件剩余全文，不调用文本模型。
+
+        从 ``planning_cursor``（或文首）起扫描标记；一刀切完本文件剩余内容，
+        cursor 推到文件末尾。找不到标记时抛 :class:`EpisodePlanningError`。
+        """
+        project = self.pm.load_project(self.project_name)
+        project = register_orphan_episode_entries(self.project_path, project)
+        self._check_source_ranges(project)
+        pre_call_sources = discover_sources(self.project_path)
+        self._check_source_fingerprints(project, sources=pre_call_sources)
+        used_fingerprints = compute_source_fingerprints(pre_call_sources)
+
+        def _pre_call_text(rel: str) -> str | None:
+            return next((doc.text for doc in pre_call_sources if doc.rel_path == rel), None)
+
+        start_ref = self._effective_start(project)
+        source_rel, start = start_ref
+        text = _pre_call_text(source_rel)
+        if text is None:
+            text = self._load_normalized_source(source_rel)
+            used_fingerprints[source_rel] = compute_source_fingerprints(
+                [SourceDoc(rel_path=source_rel, text=text)]
+            )[source_rel]
+        if start > len(text):
+            raise EpisodePlanningError(f"规划起点越界：{source_rel} 长度 {len(text)}，起点 {start}；请检查账本")
+        while not text[start:].strip():
+            next_rel = self._next_source_rel(source_rel)
+            if next_rel is None:
+                project = self._backfill_source_fingerprints_if_missing(project, used_fingerprints=used_fingerprints)
+                return PlanResult(
+                    episodes=[],
+                    cursor=project.get("planning_cursor"),
+                    source_exhausted=True,
+                    total_planned=_count_planned_episodes(project),
+                    ledger_stats=self._compute_ledger_stats(project),
+                )
+            source_rel, start = next_rel, 0
+            text = _pre_call_text(source_rel)
+            if text is None:
+                text = self._load_normalized_source(source_rel)
+                used_fingerprints[source_rel] = compute_source_fingerprints(
+                    [SourceDoc(rel_path=source_rel, text=text)]
+                )[source_rel]
+        pre_call_sources = []
+
+        remaining = text[start:]
+        slices = find_marker_episode_slices(remaining)
+        if not slices:
+            raise EpisodePlanningError(
+                "未找到「第N集/章/回/场景」分集标题行（如 ### 第1章、**场景1**、*第2回* 或 第1集 标题）。"
+                "按标记切分需要源文中带序号的标题行；也可改回智能切（planning_split_mode=llm）。"
+            )
+
+        content_mode = str(project.get("content_mode") or "narration")
+        language = _language_of(project)
+        drafts: list[NarrationEpisodeDraft] = []
+        # ends 为相对 remaining 的结束偏移（含标题行之前的内容归入上一集；
+        # 第一集从第一个标题行起算：把标题行也纳入本集范围，便于派生文件自洽）
+        marker_matches = list(_EPISODE_MARKER_RE.finditer(remaining))
+        ends: list[int] = []
+        for idx, sl in enumerate(slices):
+            # 范围：本集标题行起点 → 下一集标题行起点（或文末）
+            range_start_rel = marker_matches[idx].start()
+            range_end_rel = marker_matches[idx + 1].start() if idx + 1 < len(marker_matches) else len(remaining)
+            ends.append(range_end_rel)
+            if content_mode == "drama":
+                drafts.append(
+                    DramaEpisodeDraft(
+                        title=sl.title,
+                        hook=sl.hook,
+                        end_anchor=remaining[max(range_start_rel, range_end_rel - 12) : range_end_rel]
+                        or sl.title
+                        or "集",
+                        story_beats=["（按作者分集标记切分）"],
+                        next_episode_teaser=None,
+                    )
+                )
+            else:
+                drafts.append(
+                    NarrationEpisodeDraft(
+                        title=sl.title,
+                        hook=sl.hook,
+                        end_anchor=remaining[max(range_start_rel, range_end_rel - 12) : range_end_rel]
+                        or sl.title
+                        or "集",
+                    )
+                )
+            # end_anchor 仅满足草稿字段；提交用 ends，不走 _resolve_boundaries
+
+        summaries: list[EpisodePlanSummary] = []
+        committed: dict[str, Any] = {"stale": []}
+
+        def _commit(p: dict) -> None:
+            healed = register_orphan_episode_entries(self.project_path, p)
+            p.clear()
+            p.update(healed)
+            self._check_source_ranges(p)
+            if self._effective_start(p) != start_ref:
+                raise PlanningConflictError("规划期间账本进度被并发修改，本次结果作废；请重新调用规划")
+            current_sources = discover_sources(self.project_path)
+            self._check_source_fingerprints(p, sources=current_sources)
+            current_fingerprints = compute_source_fingerprints(current_sources)
+            changed = sorted(rel for rel, fp in used_fingerprints.items() if current_fingerprints.get(rel) != fp)
+            if changed:
+                raise _source_changed_error(changed)
+            episodes_list = [e for e in (p.get("episodes") or []) if e is not None]
+            nums = [parse_episode_num(e.get("episode")) for e in episodes_list if isinstance(e, dict)]
+            next_num = max((n for n in nums if n is not None and n > 0), default=0) + 1
+            # 第一集从规划起点起算：首个标记标题前的前缀（如「开篇钩子」）并入第1集，
+            # 避免静默丢文，也不再因无归属前缀拒切。
+            prev_rel_end = 0
+            for offset_idx, (draft_ep, rel_end) in enumerate(zip(drafts, ends, strict=True)):
+                num = next_num + offset_idx
+                abs_start = start + prev_rel_end
+                abs_end = start + rel_end
+                entry = _ledger_entry_from_draft(
+                    draft_ep, num=num, source_rel=source_rel, start=abs_start, end=abs_end, status="planned"
+                )
+                if has_downstream_products(self.project_path, num, entry):
+                    entry["ledger_status"] = "stale"
+                    step1_path = script_review.step1_path(self.project_path, p, num)
+                    entry[script_review.STALE_STEP1_REVISION_FIELD] = (
+                        script_review.content_fingerprint(step1_path) if step1_path is not None else None
+                    )
+                    committed["stale"].append(num)
+                episodes_list.append(entry)
+                summaries.append(
+                    EpisodePlanSummary(
+                        episode=num,
+                        title=draft_ep.title,
+                        hook=draft_ep.hook,
+                        reading_units=count_reading_units(text[abs_start:abs_end], language),
+                        ledger_status=entry["ledger_status"],
+                    )
+                )
+                prev_rel_end = rel_end
+            _sort_episodes_if_possible(episodes_list)
+            p["episodes"] = episodes_list
+            p["planning_cursor"] = {"source_file": source_rel, "offset": len(text)}
+            p[SOURCE_FINGERPRINTS_KEY] = current_fingerprints
+            self._reconcile_derived_files(p, {source_rel: text})
+            committed["cursor"] = p["planning_cursor"]
+            committed["exhausted"] = self._next_source_rel(source_rel) is None
+
+        final_project = self.pm.update_project(self.project_name, _commit)
+        exhausted = bool(committed["exhausted"])
+        return PlanResult(
+            episodes=summaries,
+            cursor=committed["cursor"],
+            source_exhausted=exhausted,
+            stale_episodes=list(committed["stale"]),
+            total_planned=_count_planned_episodes(final_project),
             ledger_stats=self._compute_ledger_stats(final_project) if exhausted else None,
         )
 

@@ -23,6 +23,7 @@ from lib.episode_planner import (
     PlanningConflictError,
     _DraftRejected,
     _find_all_overlapping,
+    find_marker_episode_slices,
 )
 from lib.episode_reset import EpisodeResetResult, reset_episode_planning
 from lib.text_backends.base import StructuredOutputExhaustedError, TextGenerationResult
@@ -924,8 +925,10 @@ class TestPlan:
         assert project["planning_cursor"]["offset"] == len(SOURCE)
 
     @pytest.mark.unit
-    async def test_plan_max_episodes_setting_truncates_batch(self, tmp_path: Path):
-        """planning_max_episodes 覆盖每批集数上限：超出的集截断留给下一批。"""
+    async def test_plan_max_episodes_setting_caps_schema_and_rejects_over_limit(self, tmp_path: Path):
+        """planning_max_episodes 写入 response_schema.maxItems；超限输出 schema 拒绝后重试。"""
+        from lib.text_backends.base import resolve_schema
+
         project_dir = _write_project(tmp_path, extra={"planning_max_episodes": 1})
         fake = _FakeTextGenerator(
             [
@@ -934,16 +937,35 @@ class TestPlan:
                         {"title": "甲", "hook": "甲", "end_anchor": ANCHOR_EP1},
                         {"title": "乙", "hook": "乙", "end_anchor": ANCHOR_EP2},
                     ]
-                )
+                ),
+                _plan_response([{"title": "甲", "hook": "甲", "end_anchor": ANCHOR_EP1}]),
             ]
         )
 
         result = await EpisodePlanner(project_dir, generator=fake).plan()
 
+        schema = resolve_schema(fake.requests[0].response_schema)
+        assert schema["properties"]["episodes"]["maxItems"] == 1
+        assert schema["properties"]["episodes"]["minItems"] == 1
+        assert len(fake.requests) == 2
+        assert "schema" in fake.requests[1].prompt
         assert [s.title for s in result.episodes] == ["甲"]
         project = _load_project(project_dir)
         assert len(project["episodes"]) == 1
         assert project["planning_cursor"]["offset"] == _end_of(ANCHOR_EP1)
+
+    @pytest.mark.unit
+    def test_plan_draft_model_embeds_max_items_for_drama_and_narration(self):
+        """drama / narration 动态草稿 schema 都带本批 maxItems。"""
+        from lib.episode_planner import DEFAULT_PLANNING_MAX_EPISODES, _plan_draft_model
+        from lib.text_backends.base import resolve_schema
+
+        narration = resolve_schema(_plan_draft_model("narration", DEFAULT_PLANNING_MAX_EPISODES))
+        drama = resolve_schema(_plan_draft_model("drama", 30))
+        assert narration["properties"]["episodes"]["maxItems"] == DEFAULT_PLANNING_MAX_EPISODES
+        assert drama["properties"]["episodes"]["maxItems"] == 30
+        assert "story_beats" in drama["properties"]["episodes"]["items"]["properties"]
+
 
     @pytest.mark.unit
     async def test_plan_final_window_with_whitespace_tail_marks_source_exhausted(self, tmp_path: Path):
@@ -1599,3 +1621,164 @@ class TestReconcileFailFast:
             planner._reconcile_derived_files(project, {})
 
         assert outside.read_text(encoding="utf-8") == "外部文件"  # 链接目标未被覆写
+
+
+MARKER_SOURCE = """### 第1集
+
+*雨夜，女人快步走。*
+
+**集尾钩子**：黑影把照片发给周寒。
+
+【本集完】
+
+---
+
+### 第2集
+
+*周寒被手机震动惊醒。*
+
+**集尾钩子**：照片下多了一行字。
+
+【本集完】
+"""
+
+
+class TestPlanByMarkers:
+    @pytest.mark.unit
+    def test_find_marker_slices_extracts_title_and_hook(self):
+        slices = find_marker_episode_slices(MARKER_SOURCE)
+        assert len(slices) == 2
+        assert slices[0].title == "第1集"
+        assert "周寒" in slices[0].hook
+        assert slices[1].title == "第2集"
+        assert "一行字" in slices[1].hook
+
+    @pytest.mark.unit
+    def test_find_marker_slices_accepts_chapter_and_hui_units(self):
+        text = """## 第1章 重生倒计时90天
+
+他睁开眼。
+
+## 第2章 第一桶金
+
+彩票兑奖。
+
+## 第三回 兄弟重逢
+
+烧烤摊上。
+"""
+        slices = find_marker_episode_slices(text)
+        assert len(slices) == 3
+        assert slices[0].author_num == 1
+        assert slices[0].title == "重生倒计时90天"
+        assert slices[1].author_num == 2
+        assert slices[1].title == "第一桶金"
+        assert slices[2].author_num == 3
+        assert slices[2].title == "兄弟重逢"
+
+    @pytest.mark.unit
+    def test_find_marker_slices_default_title_keeps_unit_word(self):
+        text = "### 第1章\n\n正文甲。\n\n### 第2回\n\n正文乙。\n"
+        slices = find_marker_episode_slices(text)
+        assert [s.title for s in slices] == ["第1章", "第2回"]
+
+    @pytest.mark.unit
+    def test_find_marker_slices_accepts_scene_with_hash_or_stars(self):
+        """场景N：Markdown # 标题与 * / ** 加粗行均可识别。"""
+        text = """# 末世重生剧本
+
+**第一幕：终焉**
+
+**场景1 城市废墟——黄昏**
+
+林北辰靠在断墙后。
+
+## 场景2 虚无——无时间
+
+他看见了天花板。
+
+*场景3 公寓——日*
+
+手机日期是三月十五。
+"""
+        slices = find_marker_episode_slices(text)
+        assert len(slices) == 3
+        assert [s.author_num for s in slices] == [1, 2, 3]
+        assert slices[0].title == "城市废墟——黄昏"
+        assert slices[1].title == "虚无——无时间"
+        assert slices[2].title == "公寓——日"
+
+    @pytest.mark.unit
+    def test_find_marker_slices_accepts_star_wrapped_episode_markers(self):
+        """第N集/章 也可用 **…** / *…* 包裹，不只认 # 标题。"""
+        text = """**第1集 雨夜**
+
+女人快步走。
+
+*第2章 惊醒*
+
+周寒被手机震动惊醒。
+"""
+        slices = find_marker_episode_slices(text)
+        assert len(slices) == 2
+        assert slices[0].title == "雨夜"
+        assert slices[1].title == "惊醒"
+
+    @pytest.mark.unit
+    def test_plan_by_markers_writes_ledger_without_llm(self, tmp_path: Path):
+        project_dir = _write_project(tmp_path, content_mode="drama", source_text=MARKER_SOURCE)
+        fake = _FakeTextGenerator([])
+
+        result = EpisodePlanner(project_dir, generator=fake).plan_by_markers()
+
+        assert fake.requests == []
+        assert len(result.episodes) == 2
+        assert result.source_exhausted is True
+        project = _load_project(project_dir)
+        assert len(project["episodes"]) == 2
+        assert project["episodes"][0]["title"] == "第1集"
+        assert "周寒" in project["episodes"][0]["hook"]
+        assert project["episodes"][0]["outline"]["story_beats"] == ["（按作者分集标记切分）"]
+        ep1 = (project_dir / "source" / "episode_1.txt").read_text(encoding="utf-8")
+        assert "### 第1集" in ep1
+        assert "黑影把照片发给周寒" in ep1
+        assert "### 第2集" not in ep1
+        assert project["planning_cursor"]["offset"] == len(MARKER_SOURCE)
+
+    @pytest.mark.unit
+    def test_plan_by_markers_rejects_when_no_markers(self, tmp_path: Path):
+        project_dir = _write_project(tmp_path, source_text="没有分集标记的散文。")
+        with pytest.raises(EpisodePlanningError, match="第N集/章/回/场景"):
+            EpisodePlanner(project_dir).plan_by_markers()
+
+    @pytest.mark.unit
+    def test_plan_by_markers_folds_preamble_into_first_episode(self, tmp_path: Path):
+        """首个「第N章」前的开篇钩子等无标记正文并入第1集，不再拒切。"""
+        source = """# 重生末世
+
+## 开篇钩子
+
+枪口抵着后脑勺。
+
+## 第1章 重生倒计时90天
+
+他睁开眼。
+
+## 第2章 第一桶金
+
+兑奖。
+"""
+        project_dir = _write_project(tmp_path, source_text=source)
+        result = EpisodePlanner(project_dir).plan_by_markers()
+
+        assert len(result.episodes) == 2
+        project = _load_project(project_dir)
+        assert project["episodes"][0]["title"] == "重生倒计时90天"
+        ep1 = (project_dir / "source" / "episode_1.txt").read_text(encoding="utf-8")
+        assert "开篇钩子" in ep1
+        assert "枪口抵着后脑勺" in ep1
+        assert "## 第1章" in ep1
+        assert "## 第2章" not in ep1
+        ep2 = (project_dir / "source" / "episode_2.txt").read_text(encoding="utf-8")
+        assert "兑奖" in ep2
+        assert "开篇钩子" not in ep2

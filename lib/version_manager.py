@@ -19,7 +19,7 @@ from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from lib.api_errors import BadRequestError, NotFoundError
+from lib.api_errors import BadRequestError, ConflictError, NotFoundError
 from lib.artifact_manifest import ArtifactManifestError, ProjectArtifactManifestAdapter
 from lib.json_io import atomic_write_bytes, atomic_write_json
 from lib.resource_paths import RESOURCE_TYPES as _RESOURCE_TYPES
@@ -1128,6 +1128,113 @@ class VersionManager:
             "restored_version": version,
             "current_version": version,
             "prompt": restored_prompt,
+        }
+
+    def delete_version(self, resource_type: str, resource_id: str, version: int) -> dict:
+        """Delete one history version, or clear the sole current selection.
+
+        Non-current history: remove the record and its managed snapshot; leave the
+        canonical live file untouched.
+
+        Sole current (exactly one record and it is selected): also unlink the
+        canonical media file and set ``current_version`` to 0 so callers can force
+        a fresh generation. With more than one version, the live selection still
+        cannot be deleted — restore another version first.
+        """
+        if resource_type not in self.RESOURCE_TYPES:
+            raise BadRequestError("unsupported_resource_type", resource_type=resource_type)
+
+        with self._lock:
+            data = self._load_versions()
+            resource_data = data.get(resource_type, {}).get(resource_id)
+
+            if not resource_data:
+                raise NotFoundError(
+                    "version_resource_not_found",
+                    resource_type=resource_type,
+                    resource_id=resource_id,
+                )
+
+            current = resource_data.get("current_version", 0)
+            versions = resource_data.get("versions", [])
+            if not isinstance(versions, list):
+                versions = []
+            target_index = next(
+                (index for index, record in enumerate(versions) if record.get("version") == version),
+                None,
+            )
+            if target_index is None:
+                raise NotFoundError("version_not_found", version=version)
+
+            # 仅分集成片（reference_videos / videos / audio）允许删掉唯一当前：
+            # 资产立绘等删掉唯一版本会留下指向空文件的宿主字段，仍须先切到其他版本。
+            from lib.artifact_version_provenance import is_typed_media_resource
+
+            clear_sole_current = False
+            if version == current:
+                if len(versions) != 1 or not is_typed_media_resource(resource_type):
+                    raise ConflictError("cannot_delete_current_version", version=version)
+                clear_sole_current = True
+
+            target_record = versions[target_index]
+            snapshot_rel = target_record.get("file")
+            snapshot_path: Path | None = None
+            if isinstance(snapshot_rel, str) and self.is_managed_snapshot_path(resource_type, snapshot_rel):
+                snapshot_path = self.project_path / snapshot_rel
+
+            canonical_path: Path | None = None
+            canonical_backup: Path | None = None
+            if clear_sole_current:
+                canonical_path = self.project_path / resource_relative_path(resource_type, resource_id)
+
+            versions_existed = self.versions_file.is_file()
+            versions_snapshot = self.versions_file.read_bytes() if versions_existed else None
+            deleted = False
+            try:
+                if clear_sole_current and canonical_path is not None and canonical_path.is_file():
+                    canonical_backup = _create_rollback_backup(canonical_path)
+                    canonical_path.unlink(missing_ok=True)
+                del versions[target_index]
+                resource_data["versions"] = versions
+                if clear_sole_current:
+                    resource_data["current_version"] = 0
+                    current = 0
+                self._save_versions(data)
+                if snapshot_path is not None:
+                    snapshot_path.unlink(missing_ok=True)
+                deleted = True
+            except BaseException as failure:
+                rollback_errors: list[OSError] = []
+                try:
+                    if versions_snapshot is None:
+                        self.versions_file.unlink(missing_ok=True)
+                    else:
+                        atomic_write_bytes(self.versions_file, versions_snapshot)
+                except OSError as rollback_error:
+                    rollback_errors.append(rollback_error)
+                if canonical_backup is not None and canonical_path is not None:
+                    try:
+                        os.replace(canonical_backup, canonical_path)
+                        canonical_backup = None
+                    except OSError as rollback_error:
+                        rollback_errors.append(rollback_error)
+                if rollback_errors:
+                    rollback_errors[0].__cause__ = failure
+                    raise RuntimeError(
+                        "version delete failed and durable rollback was incomplete"
+                    ) from rollback_errors[0]
+                raise
+            finally:
+                if deleted and canonical_backup is not None:
+                    _report_cleanup_failures(_unlink_paths(canonical_backup), active_failure=None)
+
+            if not deleted:
+                raise RuntimeError("version delete did not complete")
+
+        return {
+            "deleted_version": version,
+            "current_version": current,
+            "cleared_current": clear_sole_current,
         }
 
     def update_version_metadata(self, resource_type: str, resource_id: str, version: int, **metadata) -> bool:

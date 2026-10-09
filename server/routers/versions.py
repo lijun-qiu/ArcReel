@@ -32,6 +32,7 @@ from lib.resource_paths import resource_relative_path
 from lib.version_manager import VersionManager
 from server.services.artifact_version_restore import (
     TypedMediaRestoreTarget,
+    clear_typed_media_current_version,
     get_typed_media_restore_target,
     is_typed_media_restore_resource,
     is_typed_media_version_restorable,
@@ -391,4 +392,117 @@ async def restore_version(
     except ValueError as e:
         # 非法项目名 / 越界 resource_id 等坏请求，str(e) 可能含路径只进日志
         logger.warning("版本还原请求非法: %s", e)
+        raise BadRequestError("request_invalid") from e
+
+
+# ==================== 版本删除 ====================
+
+
+@router.delete("/projects/{project_name}/versions/{resource_type}/{resource_id}/{version}")
+async def delete_version(
+    project_name: str,
+    resource_type: str,
+    resource_id: str,
+    version: int,
+):
+    """删除一条历史版本，或清空唯一的当前成片选中。
+
+    非当前历史：只删记录与托管快照，不动正式路径上的当前媒体。
+
+    分集成片（reference_videos / videos / audio）在「只有一条且正是当前」时允许删除：
+    同时清正式文件、剧本指针与 Artifact Manifest，便于强制重新生成。多版本时当前
+    选中仍不可删，需先切换到其他版本。
+    """
+    try:
+        clear_target: TypedMediaRestoreTarget | None = None
+        if is_typed_media_restore_resource(resource_type):
+
+            def _preflight_clear_target() -> TypedMediaRestoreTarget | None:
+                vm = get_version_manager(project_name)
+                history = vm.get_versions(resource_type, resource_id)
+                current = history.get("current_version", 0)
+                records = history.get("versions") or []
+                sole_current = (
+                    version == current
+                    and isinstance(records, list)
+                    and len(records) == 1
+                    and isinstance(records[0], dict)
+                    and records[0].get("version") == version
+                )
+                if not sole_current:
+                    return None
+                return get_typed_media_restore_target(
+                    vm,
+                    resource_type=resource_type,
+                    resource_id=resource_id,
+                    version=version,
+                )
+
+            clear_target = await asyncio.to_thread(_preflight_clear_target)
+
+        def _sync():
+            if resource_type not in _RESTORABLE_RESOURCE_TYPES:
+                raise BadRequestError("unsupported_resource_type", resource_type=resource_type)
+            project_path = get_project_manager().get_project_path(project_name)
+            _current_file, file_path = _resolve_resource_path(resource_type, resource_id, project_path)
+            vm = get_version_manager(project_name)
+            history = vm.get_versions(resource_type, resource_id)
+            current = history.get("current_version", 0)
+            records = history.get("versions") or []
+            sole_current = (
+                version == current
+                and isinstance(records, list)
+                and len(records) == 1
+                and isinstance(records[0], dict)
+                and records[0].get("version") == version
+            )
+
+            if sole_current and is_typed_media_restore_resource(resource_type):
+                result = clear_typed_media_current_version(
+                    project_manager=get_project_manager(),
+                    project_name=project_name,
+                    project_path=project_path,
+                    versions=vm,
+                    resource_type=resource_type,
+                    resource_id=resource_id,
+                    version=version,
+                )
+            else:
+                result = vm.delete_version(resource_type, resource_id, version)
+
+            asset_fingerprints: dict[str, int] = {}
+            if result.get("cleared_current"):
+                asset_fingerprints[file_path] = 0
+                if resource_type == "videos":
+                    thumbnail_key = f"thumbnails/scene_{resource_id}.jpg"
+                    (project_path / "thumbnails" / f"scene_{resource_id}.jpg").unlink(missing_ok=True)
+                    asset_fingerprints[thumbnail_key] = 0
+                elif resource_type == "reference_videos":
+                    thumbnail_key = f"reference_videos/thumbnails/{resource_id}.jpg"
+                    (project_path / "reference_videos" / "thumbnails" / f"{resource_id}.jpg").unlink(
+                        missing_ok=True
+                    )
+                    asset_fingerprints[thumbnail_key] = 0
+
+            return {
+                "success": True,
+                **result,
+                "file_path": file_path,
+                "asset_fingerprints": asset_fingerprints,
+            }
+
+        if clear_target is not None:
+            async with generation_admission_lock(
+                project_name=project_name,
+                script_file=clear_target.script_file,
+                resource_id=resource_id,
+            ):
+                return await run_noninterruptible_sync(_sync)
+        return await asyncio.to_thread(_sync)
+
+    except ValueError as e:
+        logger.warning("版本删除请求非法: %s", e)
+        raise BadRequestError("request_invalid") from e
+    except KeyError as e:
+        logger.warning("版本删除缺少剧本单元: %s", e)
         raise BadRequestError("request_invalid") from e

@@ -27,6 +27,7 @@ from lib.artifact_manifest import (
 from lib.artifact_provenance import build_ad_episode_script_basis, build_episode_script_basis, build_step1_basis
 from lib.artifact_version_provenance import parse_typed_audio_settings, parse_typed_media_version_target
 from lib.asset_types import ASSET_SPECS, asset_name_comparison_key
+from lib.character_looks import get_look_entry, iter_character_sheet_targets, parse_look_asset_id
 from lib.grid.layout import grid_aspect_ratio_for
 from lib.grid.models import GridGeneration
 from lib.media_artifact_currency import build_current_audio_artifact_basis, build_current_video_artifact_basis
@@ -49,7 +50,11 @@ from lib.speech_presentation import (
     materialize_speech_presentation,
     presentation_artifact_paths,
 )
-from lib.storyboard_sequence import get_storyboard_items
+from lib.storyboard_sequence import (
+    character_names_on_item,
+    get_storyboard_items,
+    item_uses_previous_storyboard,
+)
 from lib.version_manager import VersionManager
 from lib.visual_artifact_provenance import (
     GridStoryboardVisual,
@@ -369,6 +374,14 @@ class TargetStatePlanner:
                 if not name or name in normalized_names:
                     raise ValueError("project asset identities must be unique after normalization")
                 normalized_names.add(name)
+                if asset_type == "character":
+                    self._plan_character_sheets(
+                        name,
+                        raw_entry,
+                        style=style,
+                        style_description=style_description,
+                    )
+                    continue
                 artifact_path = raw_entry.get(spec.sheet_field)
                 if not isinstance(artifact_path, str) or not artifact_path:
                     continue
@@ -392,6 +405,83 @@ class TargetStatePlanner:
                     continue
                 self._add_if_present(ArtifactKey.asset_sheet(asset_type, name), artifact_path, basis)
         self._planned.add("assets")
+
+    def _plan_character_sheets(
+        self,
+        name: str,
+        raw_entry: Mapping[str, Any],
+        *,
+        style: str,
+        style_description: str,
+    ) -> None:
+        """登记角色基准图与衣橱造型图（``名__look``）为独立 asset-sheet 产物。"""
+
+        entry: dict[str, Any] = dict(raw_entry)
+        looks = raw_entry.get("looks")
+        if isinstance(looks, Mapping):
+            entry["looks"] = {
+                key: dict(value) if isinstance(value, Mapping) else value for key, value in looks.items()
+            }
+        top_description = raw_entry.get("description")
+        for resource_id, artifact_path in iter_character_sheet_targets(name, entry):
+            if not isinstance(artifact_path, str) or not artifact_path:
+                continue
+            _char_name, look = parse_look_asset_id(resource_id)
+            look_entry = get_look_entry(entry, look)
+            description = ""
+            if isinstance(look_entry, dict):
+                raw_desc = look_entry.get("description")
+                if isinstance(raw_desc, str):
+                    description = raw_desc
+            if not description.strip() and isinstance(top_description, str):
+                description = top_description
+            if not description.strip():
+                continue
+            if look is None:
+                references = self._asset_sheet_references("character", name, raw_entry)
+            else:
+                references = self._look_sheet_references(name, entry, resource_id)
+            if references is None:
+                continue
+            try:
+                basis = build_asset_sheet_visual_basis(
+                    asset_type="character",
+                    asset_id=resource_id,
+                    description=description,
+                    style=style,
+                    style_description=style_description,
+                    aspect_ratio="16:9",
+                    references=references,
+                )
+            except (OSError, TypeError, ValueError):
+                continue
+            self._add_if_present(ArtifactKey.asset_sheet("character", resource_id), artifact_path, basis)
+
+    def _look_sheet_references(
+        self,
+        character_name: str,
+        entry: Mapping[str, Any],
+        resource_id: str,
+    ) -> tuple[VisualReference, ...] | None:
+        """非基准造型以基准 sheet 为源图；基准图缺失时允许零参考。"""
+
+        from lib.character_looks import resolve_look_sheet_path
+
+        base_rel = resolve_look_sheet_path(dict(entry), None)
+        if not isinstance(base_rel, str) or not base_rel:
+            return ()
+        path = self._safe_present_path(base_rel)
+        if path is None:
+            return ()
+        return (
+            self._visual_reference(
+                path=path,
+                role="source",
+                logical_type="character",
+                logical_id=resource_id,
+                kind="sheet",
+            ),
+        )
 
     def _asset_sheet_references(
         self,
@@ -530,15 +620,31 @@ class TargetStatePlanner:
                         key, basis = grid_target
                         self._add_if_present(key, artifact_path, basis)
                     continue
+                previous_chars: frozenset[str] = frozenset()
+                if index and not item.get("segment_break") and item_uses_previous_storyboard(item):
+                    previous_item = storyboard_items[index - 1]
+                    previous_assets = previous_item.get("generated_assets")
+                    previous_rel = (
+                        previous_assets.get("storyboard_image") if isinstance(previous_assets, Mapping) else None
+                    )
+                    if isinstance(previous_rel, str) and previous_rel:
+                        previous_path = self._safe_present_path(previous_rel)
+                        if previous_path is not None:
+                            previous_chars = character_names_on_item(previous_item, char_field)
                 references = self._storyboard_references(
                     item,
                     char_field=char_field,
                     scene_field=scene_field,
                     prop_field=prop_field,
+                    skip_character_names=previous_chars,
                 )
                 if references is None:
                     continue
-                if index and not item.get("segment_break"):
+                if (
+                    index
+                    and not item.get("segment_break")
+                    and item_uses_previous_storyboard(item)
+                ):
                     previous_item = storyboard_items[index - 1]
                     previous_id = str(previous_item.get(id_field) or "")
                     previous_assets = previous_item.get("generated_assets")
@@ -580,6 +686,7 @@ class TargetStatePlanner:
         char_field: str | None,
         scene_field: str,
         prop_field: str,
+        skip_character_names: frozenset[str] = frozenset(),
     ) -> list[VisualReference] | None:
         references: list[VisualReference] = []
         seen_paths: set[str] = set()
@@ -589,6 +696,11 @@ class TargetStatePlanner:
             nonlocal valid
             if not isinstance(name, str):
                 valid = False
+                return
+            if (
+                asset_type == "character"
+                and asset_name_comparison_key(name) in skip_character_names
+            ):
                 return
             spec = ASSET_SPECS[asset_type]
             bucket = self.project.get(spec.bucket_key)

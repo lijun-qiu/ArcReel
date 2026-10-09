@@ -29,6 +29,8 @@ _TABLES = tuple(spec.bucket_key for spec in ASSET_SPECS.values())
 # 源语言不会落盘),需要给 agent 在用户确认后写入的恢复通道,带 zh/en/vi enum 校验防乱填。
 # planning_window_chars / planning_max_episodes: 分集规划工具的窗口字数与每批集数覆盖项,
 # null 时回退工具内部默认。
+# planning_split_mode: 分集切分模式 llm（智能切，默认）/ markers（按第N集/章/回/场景等标题行规则切）。
+# auto_confirm_step1: step1 审片闸自动放行 + 动作间确认协议跳过（见 ADR 0067）；null 清除回默认关。
 # narration_voice / narration_speed: 项目级旁白音色与语速覆盖项,null 时回退全局配置。
 _SETTINGS_WHITELIST = (
     "episode_target_units",
@@ -36,9 +38,12 @@ _SETTINGS_WHITELIST = (
     "brief",
     "planning_window_chars",
     "planning_max_episodes",
+    "planning_split_mode",
+    "auto_confirm_step1",
     "narration_voice",
     "narration_speed",
 )
+_PLANNING_SPLIT_MODE_VALUES = ("llm", "markers")
 _SOURCE_LANGUAGE_VALUES = ("zh", "en", "vi")
 _POSITIVE_INT_SETTINGS = ("episode_target_units", "planning_window_chars", "planning_max_episodes")
 
@@ -235,6 +240,20 @@ def _coerce_setting_value(key: str, value: Any) -> Any:
             return None
         if not isinstance(value, str) or value not in _SOURCE_LANGUAGE_VALUES:
             raise ValueError(f"source_language 必须是 {list(_SOURCE_LANGUAGE_VALUES)} 之一或 null,收到 {value!r}")
+        return value
+    if key == "planning_split_mode":
+        if value is None:
+            return None
+        if not isinstance(value, str) or value not in _PLANNING_SPLIT_MODE_VALUES:
+            raise ValueError(
+                f"planning_split_mode 必须是 {list(_PLANNING_SPLIT_MODE_VALUES)} 之一或 null,收到 {value!r}"
+            )
+        return value
+    if key == "auto_confirm_step1":
+        if value is None:
+            return None
+        if not isinstance(value, bool):
+            raise ValueError(f"auto_confirm_step1 必须是布尔值或 null,收到 {value!r}")
         return value
     if key == "brief":
         if value is None:

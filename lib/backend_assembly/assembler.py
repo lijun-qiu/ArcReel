@@ -26,8 +26,15 @@ async def _load_builtin_config(resolver: ConfigResolver, provider_id: str, rate_
     之后 sync 构造闭包只读信封。
     """
     db_config = await resolver.provider_config(provider_id)
+    credentials = dict(db_config)
+    if provider_id == "agnes":
+        from lib.agnes_video_key_lease import get_leased_api_key
+
+        leased = get_leased_api_key()
+        if leased:
+            credentials["api_key"] = leased
     return LoadedConfig(
-        credentials=dict(db_config),
+        credentials=credentials,
         provider_meta=PROVIDER_REGISTRY.get(provider_id),
         rate_limiter=rate_limiter,
     )

@@ -14,10 +14,12 @@ from typing import Any
 from claude_agent_sdk import tool
 
 from lib.episode_planner import (
+    PLANNING_SPLIT_MODE_MARKERS,
     EpisodePlanner,
     EpisodePlanningError,
     LedgerStats,
     PlanResult,
+    resolve_planning_split_mode,
 )
 from lib.episode_reset import (
     EpisodeResetError,
@@ -90,20 +92,21 @@ def _format_summary(result: PlanResult, *, header: str) -> str:
 def plan_episodes_tool(ctx: ToolContext):
     @tool(
         "plan_episodes",
-        "分集规划：从账本 planning_cursor 起读一个源文窗口，调用项目配置的文本模型一次规划出"
-        "窗口内所有剧情弧完整的集（标题/钩子/原文范围；drama 另含分集大纲），在同一把项目锁内"
-        "写账本、派生 source/episode_N.txt 并清理残留派生文件。返回账本摘要（每集标题+钩子+体量）。"
-        "窗口字数与每批集数上限为内部默认，project.json 顶层 planning_window_chars / "
+        "分集规划：从账本 planning_cursor 起读源文并写入分集账本，返回摘要（每集标题+钩子+体量）。"
+        "项目 planning_split_mode=markers 时按源文「第N集/章/回/节/卷」或「场景N」标题行（# 或 *）规则一次切完当前文件剩余内容，"
+        "不调用文本模型；缺省/llm 时读一个源文窗口、调用项目配置的文本模型规划出窗口内剧情弧完整的集"
+        "（标题/钩子/原文范围；drama 另含分集大纲），在同一把项目锁内写账本、派生 source/episode_N.txt "
+        "并清理残留派生文件。窗口字数与每批集数上限为内部默认，project.json 顶层 planning_window_chars / "
         "planning_max_episodes 可覆盖，每集目标体量沿用 episode_target_units。"
         "用户表达分集意见（如按章节对齐切分、指定某处收尾）时经 instructions 传入原文；意见原样注入"
         "规划 prompt 的「用户意见」分节（遵循强度由正文表达，需要强约束时在正文写明），并附带已规划"
-        "集数、未规划余量、本窗口体量供换算切分节奏。规划按窗口分多批（长篇会多次调用本工具），instructions 不持久化，"
-        "规划全部完成前每一批调用都要重复带上同一偏好。末批即全部源文规划完毕、或再次调用已无新内容"
-        "时，返回会额外附全局体量核对材料（累计集数、体量最小几集、体量中位数、目标体量）："
-        "若用户给过总集数、按章节对齐等结构性偏好，须对照核对、有偏差明确告知用户；常规批次只报"
-        "累计已规划集数。提交时按参与源文件记录内容指纹；若检测到已记录的源文件内容被改动或消失"
-        "（源文被替换/编辑/删除，即使账本坐标仍在界内），会拒绝规划并指名变动文件，此时需调用 "
-        "reset_episode_planning 做全量重置后才能重新规划。",
+        "集数、未规划余量、本窗口体量供换算切分节奏。智能切按窗口分多批（长篇会多次调用本工具），"
+        "instructions 不持久化，规划全部完成前每一批调用都要重复带上同一偏好；标记切忽略 instructions。"
+        "末批即全部源文规划完毕、或再次调用已无新内容时，返回会额外附全局体量核对材料（累计集数、"
+        "体量最小几集、体量中位数、目标体量）：若用户给过总集数、按章节对齐等结构性偏好，须对照核对、"
+        "有偏差明确告知用户；常规批次只报累计已规划集数。提交时按参与源文件记录内容指纹；若检测到已"
+        "记录的源文件内容被改动或消失（源文被替换/编辑/删除，即使账本坐标仍在界内），会拒绝规划并指名"
+        "变动文件，此时需调用 reset_episode_planning 做全量重置后才能重新规划。",
         {
             "type": "object",
             "properties": {
@@ -112,7 +115,8 @@ def plan_episodes_tool(ctx: ToolContext):
                     "description": (
                         "用户分集意见原文（可选，如「按章节对齐切分」）；原样注入规划 prompt 的"
                         "「用户意见」分节，遵循强度由正文表达。每批调用都要重复带上，"
-                        f"缺省/空白视同未传，最长 {MAX_INSTRUCTIONS_LEN} 字符"
+                        f"缺省/空白视同未传，最长 {MAX_INSTRUCTIONS_LEN} 字符；"
+                        "planning_split_mode=markers 时忽略"
                     ),
                 }
             },
@@ -123,6 +127,29 @@ def plan_episodes_tool(ctx: ToolContext):
         if param_err is not None:
             return param_err
         try:
+            project = ctx.pm.load_project(ctx.project_name)
+            if resolve_planning_split_mode(project) == PLANNING_SPLIT_MODE_MARKERS:
+                result = EpisodePlanner(ctx.project_path).plan_by_markers()
+                if not result.episodes and result.source_exhausted:
+                    lines = ["源文已全部规划完毕，没有可规划的新内容。"]
+                    if result.ledger_stats is not None:
+                        lines += _render_ledger_stats(result.ledger_stats)
+                    return {"content": [{"type": "text", "text": "\n".join(lines)}]}
+                return {
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": _format_summary(
+                                result,
+                                header=(
+                                    f"✅ 已按标记切分 {len(result.episodes)} 集"
+                                    "（未调用文本模型）："
+                                ),
+                            ),
+                        }
+                    ]
+                }
+
             planner = await EpisodePlanner.create(ctx.project_path)
             result = await planner.plan(instructions=instructions)
             if not result.episodes and result.source_exhausted:
@@ -155,9 +182,10 @@ def reset_episode_planning_tool(ctx: ToolContext):
         "与当前源文一致，且保留段坐标须完整、连续、落在当前源文界内），任一不满足会拒绝执行并"
         "指明具体原因，此时改用 from_episode=1 做全量重置。"
         "两种模式都对波及已消费集（已有 step1/剧本/媒体产物）时不执行并返回受影响清单，须告知用户、"
-        "确认后带 confirm_consumed=true 重新调用。任何下游产物（剧本、媒体）都不会被删除；"
+        "确认后带 confirm_consumed=true 重新调用。重置范围内的剧本 JSON 会删除（避免残留剧本被"
+        "同步回无 source_range 的账本条目），step1 草稿与媒体产物保留；"
         "重置范围内可由账本重造的 source/episode_N.txt 会被删除，无原文范围记录的集文件改名留底"
-        "（不会丢内容），保留段的派生文件不受影响。",
+        "（不会丢内容），保留段的派生文件与剧本不受影响。",
         {
             "type": "object",
             "properties": {
@@ -200,7 +228,7 @@ def reset_episode_planning_tool(ctx: ToolContext):
             lines = [
                 f"⚠️ 本次重置会波及已消费集（已有 step1/剧本/媒体产物）：第 {episodes} 集。尚未执行任何改动。",
                 "请把影响范围告知用户；用户确认后带 confirm_consumed=true 重新调用"
-                f"（剧本与媒体产物不会被删除，但{aftermath}）。",
+                f"（重置范围内的剧本会删除，step1 草稿与媒体保留；{aftermath}）。",
             ]
             if result.archived_files:
                 lines.append(f"其中无原文范围记录的集文件会改名留底：{'、'.join(result.archived_files)}")
@@ -214,13 +242,13 @@ def reset_episode_planning_tool(ctx: ToolContext):
                 f"planning_cursor 已退到第 {from_episode - 1} 集原文范围末尾。"
             ]
         if result.deleted_files:
-            lines.append(f"已删除可重造的派生集文件 {len(result.deleted_files)} 个。")
+            lines.append(f"已删除派生集文件 / 剧本 {len(result.deleted_files)} 个。")
         if result.archived_files:
             archived = "、".join(f"{src} → {dst}" for src, dst in result.archived_files)
             lines.append(f"无原文范围记录的集文件已改名留底（内容保留）：{archived}")
         if result.consumed_episodes:
             consumed = "、".join(str(num) for num in result.consumed_episodes)
-            lines.append(f"第 {consumed} 集的剧本 / 媒体产物仍在磁盘，未删除。")
+            lines.append(f"第 {consumed} 集的剧本已删除；step1 草稿与媒体产物仍在磁盘，未删除。")
         if from_episode == 1:
             lines.append("账本已空，请调用 plan_episodes 从头重新规划（集号从第 1 集起）。")
         else:

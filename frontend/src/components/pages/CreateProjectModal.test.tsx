@@ -268,14 +268,16 @@ describe("CreateProjectModal", () => {
     await waitFor(() => expect(screen.getByRole("button", { name: /下一步/ })).toBeEnabled());
     fireEvent.click(screen.getByRole("button", { name: /下一步/ }));
     fireEvent.click(await screen.findByRole("button", { name: /创建项目/ }));
-    // 执行模型换成 seedance：4 秒不在其支持集内、1080p 也不是它的分辨率，两者都不跟进载荷
+    // 执行模型换成 seedance：4 秒不在其支持集内被清掉；分辨率重置为该模型偏好档 720p（唯一候选）
     await waitFor(() =>
       expect(API.createProject).toHaveBeenCalledWith(
-        expect.objectContaining({ generation_mode: "reference_video", default_duration: null }),
+        expect.objectContaining({
+          generation_mode: "reference_video",
+          default_duration: null,
+          model_settings: { "ark/seedance": { resolution: "720p" } },
+        }),
       ),
     );
-    const payload = vi.mocked(API.createProject).mock.calls[0][0] as { model_settings?: Record<string, unknown> };
-    expect(payload.model_settings).toBeUndefined();
   });
 
   it("shows error toast and stays on step 3 when createProject fails", async () => {

@@ -2892,6 +2892,10 @@ class ProjectManager:
             if not isinstance(bucket, dict) or key is None:
                 raise KeyError(f"{spec.label_zh} '{name}' 不存在")
             bucket[key][spec.sheet_field] = sheet_path
+            if asset_type == "character":
+                from lib.character_looks import set_look_sheet
+
+                set_look_sheet(bucket[key], None, sheet_path)
 
         return self.update_project(project_name, _mutate, on_commit=on_commit)
 
@@ -3033,6 +3037,49 @@ class ProjectManager:
         """更新项目级角色设计图路径"""
         return self._update_asset_sheet("character", project_name, name, sheet_path)
 
+    def upsert_character_look(
+        self, project_name: str, char_name: str, look_id: str, *, description: str = ""
+    ) -> dict:
+        """新增或更新角色非 base look 的 description。"""
+
+        from lib.character_looks import upsert_look
+
+        def _mutate(project: dict) -> None:
+            key = resolve_asset_key(project.get("characters"), char_name)
+            if key is None:
+                raise KeyError(f"角色 '{char_name}' 不存在")
+            upsert_look(project["characters"][key], look_id, description=description)
+
+        return self.update_project(project_name, _mutate)
+
+    def delete_character_look(self, project_name: str, char_name: str, look_id: str) -> dict:
+        """删除角色非 base look。"""
+
+        from lib.character_looks import delete_look
+
+        def _mutate(project: dict) -> None:
+            key = resolve_asset_key(project.get("characters"), char_name)
+            if key is None:
+                raise KeyError(f"角色 '{char_name}' 不存在")
+            delete_look(project["characters"][key], look_id)
+
+        return self.update_project(project_name, _mutate)
+
+    def update_character_look_sheet(
+        self, project_name: str, char_name: str, look_id: str | None, sheet_path: str
+    ) -> dict:
+        """写入角色某造型的 sheet 路径（``look_id`` 为 None/base 时同步顶层）。"""
+
+        from lib.character_looks import set_look_sheet
+
+        def _mutate(project: dict) -> None:
+            key = resolve_asset_key(project.get("characters"), char_name)
+            if key is None:
+                raise KeyError(f"角色 '{char_name}' 不存在")
+            set_look_sheet(project["characters"][key], look_id, sheet_path)
+
+        return self.update_project(project_name, _mutate)
+
     def update_character_reference_image(self, project_name: str, char_name: str, ref_path: str) -> dict:
         """
         更新角色的参考图路径
@@ -3050,7 +3097,12 @@ class ProjectManager:
             key = resolve_asset_key(project.get("characters"), char_name)
             if key is None:
                 raise KeyError(f"角色 '{char_name}' 不存在")
-            project["characters"][key]["reference_image"] = ref_path
+            entry = project["characters"][key]
+            entry["reference_image"] = ref_path
+            from lib.character_looks import ensure_character_looks
+
+            ensure_character_looks(entry)
+            entry["looks"]["base"]["reference_image"] = ref_path
 
         return self.update_project(project_name, _mutate)
 
@@ -3286,6 +3338,10 @@ class ProjectManager:
                 entry[field] = []
             else:
                 entry[field] = value  # 非法类型透传，由落盘前结构校验 fail-loud
+        if asset_type == "character":
+            from lib.character_looks import ensure_character_looks
+
+            ensure_character_looks(entry)
         return entry
 
     def add_character(self, project_name: str, name: str, description: str, voice_style: str = "") -> bool:

@@ -87,6 +87,7 @@ export function ScriptPreviewPanel({ projectName, episode, text, lookup }: Scrip
   const counts = useMemo(
     () => ({
       dialogue: utterances.filter((u) => u.kind === "dialogue").length,
+      innerMonologue: utterances.filter((u) => u.kind === "inner_monologue").length,
       voiceover: utterances.filter((u) => u.kind === "voiceover").length,
     }),
     [utterances],
@@ -151,9 +152,10 @@ export function ScriptPreviewPanel({ projectName, episode, text, lookup }: Scrip
       >
         <dt className="text-[var(--color-text-4)]">{t("script_preview_utterances")}</dt>
         <dd className="text-[var(--color-text-2)]">
-          {counts.dialogue + counts.voiceover > 0
+          {counts.dialogue + counts.innerMonologue + counts.voiceover > 0
             ? t("script_preview_utterances_value", {
                 dialogue: counts.dialogue,
+                inner_monologue: counts.innerMonologue,
                 voiceover: counts.voiceover,
               })
             : <span className="text-[var(--color-text-4)]">{t("script_preview_none")}</span>}
@@ -167,7 +169,15 @@ export function ScriptPreviewPanel({ projectName, episode, text, lookup }: Scrip
           className={`mt-2 flex flex-col gap-1 text-[11.5px] ${stale ? "opacity-45" : ""}`}
         >
           {utterances.map((u, i) => {
-            const palette = assetColor(u.kind === "dialogue" ? "character" : "unknown");
+            const palette = assetColor(
+              u.kind === "dialogue" || u.kind === "inner_monologue" ? "character" : "unknown",
+            );
+            const label =
+              u.kind === "dialogue"
+                ? u.speaker
+                : u.kind === "inner_monologue"
+                  ? t("script_highlight_inner_monologue_of", { speaker: u.speaker })
+                  : t("script_highlight_voiceover");
             return (
               <li key={`${u.index}-${i}`} className="flex items-baseline gap-2">
                 <span className="shrink-0 font-mono tabular-nums text-[var(--color-text-4)]">
@@ -177,7 +187,7 @@ export function ScriptPreviewPanel({ projectName, episode, text, lookup }: Scrip
                   translate="no"
                   className={`shrink-0 rounded-sm px-1 ${palette.textClass} ${palette.bgClass}`}
                 >
-                  {u.kind === "dialogue" ? u.speaker : t("script_highlight_voiceover")}
+                  {label}
                 </span>
                 <span className="min-w-0 flex-1 break-words text-[var(--color-text-2)]">{u.text}</span>
               </li>

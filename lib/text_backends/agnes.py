@@ -14,7 +14,12 @@ from lib.providers import PROVIDER_AGNES
 from lib.text_backends.base import TextCapability
 from lib.text_backends.openai import OpenAITextBackend
 
-DEFAULT_MODEL = "agnes-2.5-flash"
+DEFAULT_MODEL = "agnes-3.0-flash"
+
+
+def _agnes_text_supports_vision(model: str) -> bool:
+    """官方文档声明支持图像 URL 输入的型号（当前 3.0 一代）。"""
+    return model == "agnes-3.0-flash" or model.startswith("agnes-3.0")
 
 
 class AgnesTextBackend(OpenAITextBackend):
@@ -29,12 +34,15 @@ class AgnesTextBackend(OpenAITextBackend):
     ) -> None:
         # Bearer 单 key 在构造期校验：缺失即本地 raise，与 AgnesImageBackend 同 fail-loud，不把缺失
         # key 拖到请求期才收上游 401。base_url 归一化为 {host}/v1，容忍用户填 host 或带 /v1 后缀。
+        resolved_model = model or DEFAULT_MODEL
         super().__init__(
             api_key=resolve_agnes_api_key(api_key),
-            model=model or DEFAULT_MODEL,
+            model=resolved_model,
             base_url=agnes_base_url(base_url),
             provider_name=PROVIDER_AGNES,
         )
-        # agnes-2.5-flash / 2.0-flash 仅声明文本生成与结构化输出；vision 未在本 backend
-        # 路径实测，不纳入能力集（父类默认含 VISION）。
-        self._capabilities = {TextCapability.TEXT_GENERATION, TextCapability.STRUCTURED_OUTPUT}
+        # 2.x flash 仅声明文本生成与结构化输出；3.0 官方支持图像 URL，纳入 vision。
+        caps = {TextCapability.TEXT_GENERATION, TextCapability.STRUCTURED_OUTPUT}
+        if _agnes_text_supports_vision(resolved_model):
+            caps.add(TextCapability.VISION)
+        self._capabilities = caps

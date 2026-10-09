@@ -27,6 +27,10 @@ class ProviderCredential(TimestampMixin, Base):
     provider: Mapped[str] = mapped_column(String(32), nullable=False)
     name: Mapped[str] = mapped_column(String(128), nullable=False)
     api_key: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Key 池 JSON：Agnes 批量视频「一 key 一路」（见 lib.agnes_video_key_lease）；
+    # 魔搭 ModelScope 为手动选用 key 池（见 lib.modelscope_key_pool）。
+    # 其它供应商本列恒为 NULL。
+    api_keys: Mapped[str | None] = mapped_column(Text, nullable=True)
     credentials_path: Mapped[str | None] = mapped_column(Text, nullable=True)
     base_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     # 按 registry key 命名的定型列，承载需要两个 secret 字符串的内置 provider（可灵 Kling 的

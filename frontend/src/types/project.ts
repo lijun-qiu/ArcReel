@@ -10,12 +10,21 @@
 import type { VoiceConsistencyTier } from "@/types/provider";
 import type { GenerationRoute } from "@/utils/generation-mode";
 
+/** 分集切分模式：智能切（LLM）或按作者「第N集/章/回」「场景N」等标记规则切 */
+export type PlanningSplitMode = "llm" | "markers";
+
 export interface ProjectOverview {
   synopsis: string;
   genre: string;
   theme: string;
   world_setting: string;
   generated_at?: string;
+}
+
+export interface CharacterLook {
+  description: string;
+  character_sheet?: string;
+  reference_image?: string;
 }
 
 export interface Character {
@@ -29,6 +38,8 @@ export interface Character {
   /** 已确认到的声音版本（ISO8601，取关闭时的 voice_updated_at 原值）；
    *  voice_updated_at 晚于此值即视为新版本。 */
   voice_notice_dismissed_at?: string;
+  /** 衣橱造型；必须含 base，与顶层 description/sheet 同源。 */
+  looks?: Record<string, CharacterLook>;
 }
 
 export interface Scene {
@@ -129,6 +140,21 @@ export interface ModelSettingEntry {
   resolution?: string | null;
 }
 
+/** 本机 MiniMax H3 偏好（仅设置面板；外部 Comfy/脚本读取，不进 ArcReel 队列）。 */
+export type LocalH3Quant = "int8" | "fp8" | "gguf";
+/** 参考图生视频 ref2v / 分镜图（首尾帧）生视频 fl2v，对齐 Comfy MiniMax H3。 */
+export type LocalH3Path = "ref2v" | "fl2v";
+/** manual=硬减步数；distill_*=加载对应 turbo LoRA 并固定步数。 */
+export type LocalH3StepMode = "manual" | "distill_8" | "distill_4";
+
+export interface LocalH3Settings {
+  quant: LocalH3Quant;
+  path: LocalH3Path;
+  step_mode: LocalH3StepMode;
+  /** manual 时可调；distill_8/4 分别固定为 8/4。 */
+  steps: number;
+}
+
 export interface ProjectData {
   title: string;
   content_mode: "narration" | "drama" | "ad";
@@ -176,6 +202,16 @@ export interface ProjectData {
   source_language?: string | null;
   /** 口播语速估算（阅读单位 / 秒）项目级覆盖；留空即按项目语言的默认速度估算 */
   speech_rate_units_per_second?: number | null;
+  /** 分集规划单批源文窗口字符数；未设置时回退工具内部默认 */
+  planning_window_chars?: number | null;
+  /** 分集规划单批最多产出集数；未设置时回退工具内部默认 */
+  planning_max_episodes?: number | null;
+  /** 分集切分模式：llm=智能切（默认），markers=按源文「第N集/章/回」「场景N」等标题行规则切 */
+  planning_split_mode?: PlanningSplitMode | null;
+  /** step1 审片闸自动放行；开启后正式 step1 无需再点确认（隔离草稿仍阻塞） */
+  auto_confirm_step1?: boolean | null;
+  /** 本机 H3 量化/步数偏好；不参与云端生成 */
+  local_h3?: LocalH3Settings | null;
   text_backend_simple?: string | null;
   text_backend_complex?: string | null;
   default_text_backend?: string | null;

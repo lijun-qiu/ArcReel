@@ -24,9 +24,12 @@ MESSAGES: dict[str, str] = {
     "template_name_live_wong": "Vương Gia Vệ",
     "template_name_live_shaw": "Shaw Brothers",
     "template_name_live_cyberpunk": "Cyberpunk Người đóng",
-    # ===== Anim names (18) =====
+    # ===== Anim names (21) =====
     "template_name_anim_3d_cg": "3D Game CG",
     "template_name_anim_cn_3d": "3D Trung Quốc",
+    "template_name_anim_cn_short_drama": "Phim ngắn 3D bán thực",
+    "template_name_anim_cn_2d_drama": "Phim ngắn 2D Trung Quốc",
+    "template_name_anim_cn_idol_manhua": "Idol Manhua đô thị",
     "template_name_anim_kyoto": "Kyoto Animation",
     "template_name_anim_arcane": "Arcane (Sơn dầu 3D)",
     "template_name_anim_us_3d": "Hoạt hình 3D Mỹ",
@@ -62,9 +65,12 @@ MESSAGES: dict[str, str] = {
     "template_tagline_live_wong": "Hạt phim · Đô thị phương Đông",
     "template_tagline_live_shaw": "Võ hiệp HK · Chất điện ảnh",
     "template_tagline_live_cyberpunk": "Chất điện ảnh · Siêu nét",
-    # ===== Anim taglines (18) =====
+    # ===== Anim taglines (21) =====
     "template_tagline_anim_3d_cg": "Chất điện ảnh · Unreal Engine",
     "template_tagline_anim_cn_3d": "Chất điện ảnh · Unreal Engine",
+    "template_tagline_anim_cn_short_drama": "Idol mềm · Phim 16:9",
+    "template_tagline_anim_cn_2d_drama": "Viền đậm · Cel phẳng",
+    "template_tagline_anim_cn_idol_manhua": "V-face idol · Minh họa 2D",
     "template_tagline_anim_kyoto": "Cel mềm · Tateishi",
     "template_tagline_anim_arcane": "Arcane · Fortiche",
     "template_tagline_anim_us_3d": "Chất điện ảnh · Pixar",

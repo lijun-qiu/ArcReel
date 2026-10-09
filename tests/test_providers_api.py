@@ -883,6 +883,50 @@ class TestTestProviderConnection:
         assert resp.success is True
 
     @pytest.mark.unit
+    def test_modelscope_registered_in_dispatch(self):
+        # modelscope 顶栏 Key 切换器与设置页都依赖连接测试；未登记会落到 unsupported_test
+        assert "modelscope" in providers._TEST_DISPATCH
+
+    @pytest.mark.unit
+    def test_modelscope_test_fn_uses_official_base_and_filters_models(self):
+        from types import SimpleNamespace
+
+        from lib.config.registry import MODELSCOPE_API_BASE_URL
+
+        captured: dict = {}
+
+        class _FakeModels:
+            def list(self):
+                return SimpleNamespace(
+                    data=[
+                        SimpleNamespace(id="deepseek-ai/DeepSeek-V4-Flash-0731"),
+                        SimpleNamespace(id="ZhipuAI/GLM-4.6"),
+                        SimpleNamespace(id="text-embedding-v1"),
+                    ]
+                )
+
+        class _FakeOpenAI:
+            def __init__(self, **kwargs):
+                captured.update(kwargs)
+                self.models = _FakeModels()
+
+        with patch("openai.OpenAI", _FakeOpenAI):
+            resp = providers._test_modelscope({"api_key": "ms-key"}, lambda k, **kw: k)
+        assert captured["base_url"] == MODELSCOPE_API_BASE_URL
+        assert captured["api_key"] == "ms-key"
+        assert resp.available_models == [
+            "ZhipuAI/GLM-4.6",
+            "deepseek-ai/DeepSeek-V4-Flash-0731",
+        ]
+        assert resp.success is True
+
+    @pytest.mark.unit
+    def test_modelscope_test_fn_missing_key(self):
+        resp = providers._test_modelscope({"api_key": "  "}, lambda k, **kw: k)
+        assert resp.success is False
+        assert resp.message == "missing_credentials"
+
+    @pytest.mark.unit
     def test_kling_registered_in_dispatch(self):
         # kling 作为内置 provider 暴露在设置页，连接测试必须有 dispatcher，
         # 否则点"测试连接"会落到 unsupported_test 分支（即便凭证有效）
@@ -1152,3 +1196,223 @@ class TestArkAgentPlanConnectionTest:
                 resp = client.post("/api/v1/providers/ark-agent-plan/test")
         assert resp.status_code == 200
         assert captured["base_url"] == "https://custom.example.com/v9"
+
+
+# ---------------------------------------------------------------------------
+# Agnes provider credential api_keys pool
+# ---------------------------------------------------------------------------
+
+
+class TestAgnesCredentialKeyPool:
+    @pytest.mark.unit
+    def test_agnes_pool_fields_from_multiline_text(self):
+        keys_json, primary = providers._agnes_pool_fields("k1\nk2\n")
+        assert primary == "k1"
+        assert keys_json is not None
+        assert "k2" in keys_json
+
+    @pytest.mark.unit
+    def test_agnes_pool_fields_empty_clears(self):
+        assert providers._agnes_pool_fields("") == (None, None)
+        assert providers._agnes_pool_fields(None) == (None, None)
+
+    @pytest.mark.unit
+    def test_cred_to_response_includes_agnes_pool_count(self):
+        from datetime import datetime, timezone
+
+        cred = MagicMock(spec=ProviderCredential)
+        cred.id = 9
+        cred.provider = "agnes"
+        cred.name = "pool"
+        cred.api_key = "k1"
+        cred.api_keys = '[{"key":"k1"},{"key":"k2"}]'
+        cred.credentials_path = None
+        cred.base_url = None
+        cred.access_key = None
+        cred.secret_key = None
+        cred.is_active = True
+        cred.created_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+
+        resp = providers._cred_to_response(cred)
+        assert resp.api_keys_count == 2
+        assert resp.api_keys_masked is not None
+        assert len(resp.api_keys_masked) == 2
+
+    @pytest.mark.unit
+    def test_create_agnes_credential_with_api_keys_text(self):
+        from datetime import datetime, timezone
+
+        created = MagicMock(spec=ProviderCredential)
+        created.id = 1
+        created.provider = "agnes"
+        created.name = "batch-pool"
+        created.api_key = "k1"
+        created.api_keys = '[{"key":"k1"},{"key":"k2"}]'
+        created.credentials_path = None
+        created.base_url = None
+        created.access_key = None
+        created.secret_key = None
+        created.is_active = False
+        created.created_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+
+        repo = MagicMock(spec=CredentialRepository)
+        repo.create = AsyncMock(return_value=created)
+
+        session = AsyncMock()
+        session.commit = AsyncMock()
+
+        async def _override_session():
+            yield session
+
+        app = FastAPI()
+        app.dependency_overrides[get_async_session] = _override_session
+        app.dependency_overrides[get_translator] = lambda: make_translator("zh")
+        override_auth(app)
+        app.include_router(providers.router, prefix="/api/v1", dependencies=AUTH_DEPENDENCIES)
+
+        with patch("server.routers.providers.CredentialRepository", return_value=repo):
+            with TestClient(app) as client:
+                resp = client.post(
+                    "/api/v1/providers/agnes/credentials",
+                    json={"name": "batch-pool", "api_keys_text": "k1\nk2"},
+                )
+        assert resp.status_code == 201
+        body = resp.json()
+        assert body["api_keys_count"] == 2
+        kwargs = repo.create.await_args.kwargs
+        assert kwargs["api_key"] == "k1"
+        assert kwargs["api_keys"] is not None
+
+
+# ---------------------------------------------------------------------------
+# ModelScope provider credential key pool (manual switch)
+# ---------------------------------------------------------------------------
+
+
+class TestModelScopeCredentialKeyPool:
+    @pytest.mark.unit
+    def test_modelscope_pool_fields_from_text(self):
+        keys_json, primary = providers._modelscope_pool_fields_from_text("ms-a\nms-b:80\n")
+        assert primary == "ms-a"
+        assert keys_json is not None
+        assert "ms-b" in keys_json
+        assert "remaining" not in keys_json
+
+    @pytest.mark.unit
+    def test_cred_to_response_includes_modelscope_pool(self):
+        from datetime import datetime, timezone
+
+        from lib.modelscope_key_pool import ModelScopePoolEntry, serialize_modelscope_api_keys
+
+        cred = MagicMock(spec=ProviderCredential)
+        cred.id = 3
+        cred.provider = "modelscope"
+        cred.name = "ms-pool"
+        cred.api_key = "ms-a"
+        cred.api_keys = serialize_modelscope_api_keys(
+            [
+                ModelScopePoolEntry(key="ms-a", label="K1"),
+                ModelScopePoolEntry(key="ms-b", label="K2"),
+            ]
+        )
+        cred.credentials_path = None
+        cred.base_url = None
+        cred.access_key = None
+        cred.secret_key = None
+        cred.is_active = True
+        cred.created_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+
+        resp = providers._cred_to_response(cred)
+        assert resp.api_keys_count == 2
+        assert resp.modelscope_pool is not None
+        assert len(resp.modelscope_pool) == 2
+        assert resp.modelscope_pool[0].active is True
+        assert resp.modelscope_pool[1].active is False
+
+    @pytest.mark.unit
+    def test_create_modelscope_credential_with_api_keys_text(self):
+        from datetime import datetime, timezone
+
+        from lib.modelscope_key_pool import ModelScopePoolEntry, serialize_modelscope_api_keys
+
+        created = MagicMock(spec=ProviderCredential)
+        created.id = 1
+        created.provider = "modelscope"
+        created.name = "ms-keys"
+        created.api_key = "ms-a"
+        created.api_keys = serialize_modelscope_api_keys([ModelScopePoolEntry(key="ms-a", label="K1")])
+        created.credentials_path = None
+        created.base_url = None
+        created.access_key = None
+        created.secret_key = None
+        created.is_active = True
+        created.created_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+
+        repo = MagicMock(spec=CredentialRepository)
+        repo.create = AsyncMock(return_value=created)
+
+        session = AsyncMock()
+        session.commit = AsyncMock()
+
+        async def _override_session():
+            yield session
+
+        app = FastAPI()
+        app.dependency_overrides[get_async_session] = _override_session
+        app.dependency_overrides[get_translator] = lambda: make_translator("zh")
+        override_auth(app)
+        app.include_router(providers.router, prefix="/api/v1", dependencies=AUTH_DEPENDENCIES)
+
+        with patch("server.routers.providers.CredentialRepository", return_value=repo):
+            with TestClient(app) as client:
+                resp = client.post(
+                    "/api/v1/providers/modelscope/credentials",
+                    json={"name": "ms-keys", "api_keys_text": "ms-a\nms-b"},
+                )
+        assert resp.status_code == 201
+        kwargs = repo.create.await_args.kwargs
+        assert kwargs["api_key"] == "ms-a"
+        assert kwargs["api_keys"] is not None
+
+    @pytest.mark.unit
+    def test_select_modelscope_key_updates_active(self):
+        from lib.agent_key_pool import fingerprint
+        from lib.modelscope_key_pool import ModelScopePoolEntry, serialize_modelscope_api_keys
+
+        cred = MagicMock(spec=ProviderCredential)
+        cred.id = 7
+        cred.provider = "modelscope"
+        cred.api_key = "ms-a"
+        cred.api_keys = serialize_modelscope_api_keys(
+            [ModelScopePoolEntry(key="ms-a"), ModelScopePoolEntry(key="ms-b")]
+        )
+        cred.is_active = True
+
+        repo = MagicMock(spec=CredentialRepository)
+        repo.get_active = AsyncMock(return_value=cred)
+        repo.update = AsyncMock()
+
+        session = AsyncMock()
+        session.commit = AsyncMock()
+
+        async def _override_session():
+            yield session
+
+        app = FastAPI()
+        app.dependency_overrides[get_async_session] = _override_session
+        app.dependency_overrides[get_translator] = lambda: make_translator("zh")
+        override_auth(app)
+        app.include_router(providers.router, prefix="/api/v1", dependencies=AUTH_DEPENDENCIES)
+
+        with (
+            patch("server.routers.providers.CredentialRepository", return_value=repo),
+            patch("server.routers.providers._invalidate_caches", new_callable=AsyncMock),
+        ):
+            with TestClient(app) as client:
+                resp = client.put(
+                    "/api/v1/providers/modelscope/key-pool/active",
+                    json={"fingerprint": fingerprint("ms-b")},
+                )
+        assert resp.status_code == 204
+        repo.update.assert_awaited()
+        assert repo.update.await_args.kwargs["api_key"] == "ms-b"

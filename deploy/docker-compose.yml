@@ -1,6 +1,9 @@
 services:
-  # 自定义供应商强制 /v1；本机注入代理无 /v1。内置 openrouter/modelscope 不走 /v1。
+  # 仅在需要剥离自定义供应商 /v1 前缀时启动：
+  #   docker compose --profile strip-proxy up -d
+  # 默认开发只起 arcreel；内置 openrouter/modelscope 直连 host 代理端口。
   openrouter-strip:
+    profiles: ["strip-proxy"]
     image: ghcr.io/arcreel/arcreel:latest
     entrypoint: ["python", "/strip/strip_v1_proxy.py"]
     environment:
@@ -13,6 +16,7 @@ services:
     restart: unless-stopped
 
   modelscope-strip:
+    profiles: ["strip-proxy"]
     image: ghcr.io/arcreel/arcreel:latest
     entrypoint: ["python", "/strip/strip_v1_proxy.py"]
     environment:
@@ -37,9 +41,9 @@ services:
       UV_HTTP_TIMEOUT: ${UV_HTTP_TIMEOUT:-120}
       OPENROUTER_PROXY_BASE_URL: http://host.docker.internal:9999
       MODELSCOPE_PROXY_BASE_URL: http://host.docker.internal:10001
-    depends_on:
-      - openrouter-strip
-      - modelscope-strip
+      INDEXTTS_CONTROL_BASE_URL: http://host.docker.internal:10004
+      INDEXTTS_PROXY_BASE_URL: http://host.docker.internal:10003
+      REALESRGAN_PROXY_BASE_URL: http://host.docker.internal:10005
     extra_hosts:
       - "host.docker.internal:host-gateway"
     security_opt:

@@ -10,6 +10,7 @@ import type {
   Utterance,
 } from "@/types";
 import { useAppStore } from "@/stores/app-store";
+import { useProjectsStore } from "@/stores/projects-store";
 import { useScriptReviewDraft } from "@/hooks/useScriptReviewDraft";
 import { voidPromise } from "@/utils/async";
 import { AutoTextarea } from "@/components/ui/AutoTextarea";
@@ -166,6 +167,7 @@ function NarrationSegmentCard({
 export function ScriptReviewGate({ projectName, episode, contentMode }: ScriptReviewGateProps) {
   const { t } = useTranslation("dashboard");
   const pushToast = useAppStore((s) => s.pushToast);
+  const autoConfirmStep1 = useProjectsStore((s) => s.currentProjectData?.auto_confirm_step1 === true);
 
   const handleConfirmed = useCallback(() => {
     pushToast(t("dashboard:review_confirmed"), "success");
@@ -236,6 +238,9 @@ export function ScriptReviewGate({ projectName, episode, contentMode }: ScriptRe
   }
 
   const confirmed = status === "confirmed" && !dirty;
+  const confirmedHint = autoConfirmStep1
+    ? t("dashboard:review_auto_confirmed_hint")
+    : t("dashboard:review_confirmed_hint");
 
   return (
     <div className="flex flex-col gap-3">
@@ -255,7 +260,7 @@ export function ScriptReviewGate({ projectName, episode, contentMode }: ScriptRe
               {confirmed ? t("dashboard:review_status_confirmed") : t("dashboard:review_status_pending")}
             </span>
             <span className="text-[11px] text-text-4">
-              {confirmed ? t("dashboard:review_confirmed_hint") : t("dashboard:review_pending_hint")}
+              {confirmed ? confirmedHint : t("dashboard:review_pending_hint")}
             </span>
           </div>
         </div>

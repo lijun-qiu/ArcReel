@@ -15,14 +15,13 @@ class TestZh:
         assert count_reading_units("今天天气真好我们一起去公园", "zh") == 13
 
     def test_with_cjk_quotes_and_punct(self) -> None:
-        # 「你好」+ 句号 + 「。」之外标点。「」, 。 都计入
+        # 引号、句号等标点不计；只计「他」「说」「你」「好」4 字
         text = "他说：「你好。」"
-        assert count_reading_units(text, "zh") == len(text)
+        assert count_reading_units(text, "zh") == 4
 
     def test_mixed_with_ascii_digits(self) -> None:
-        # 5 个汉字 + 「:」全角 1 + 半角字母数字均不计
-        # 「他说：abc 123」中文 1+1+全角冒号(＀-￯) = 3 单位；ascii 字母数字不计
-        assert count_reading_units("他说：abc 123", "zh") == 3
+        # 汉字 2；全角冒号与 ascii 字母数字均不计
+        assert count_reading_units("他说：abc 123", "zh") == 2
 
     def test_only_ascii_punct_no_chinese(self) -> None:
         # 纯 ascii 标点不被中文区段命中
@@ -93,9 +92,8 @@ class TestFindReadingUnitOffset:
         assert find_reading_unit_offset("今天天气真好", 3, "zh") == 3
 
     def test_zh_with_mixed_ascii(self) -> None:
-        # "他说：abc 123，好" 阅读单位:他 说 ：（全角）, ，（全角）, 好
-        # 第 3 个单位"：" 末尾 = 索引 3 (0-based 'a' 前)
-        assert find_reading_unit_offset("他说：abc 123，好", 3, "zh") == 3
+        # "他说：abc 123，好" 阅读单位仅汉字:他 说 好；第 3 个「好」末尾 = len(text) = 12
+        assert find_reading_unit_offset("他说：abc 123，好", 3, "zh") == 12
 
     def test_en_returns_end_of_nth_word(self) -> None:
         # "hello world foo" 第 2 个 word "world" 末尾 = 索引 11

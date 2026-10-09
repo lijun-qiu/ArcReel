@@ -99,6 +99,161 @@ describe("VersionTimeMachine", () => {
     });
   });
 
+  it("deletes a non-current asset history version after confirmation", async () => {
+    vi.spyOn(API, "getVersions")
+      .mockResolvedValueOnce({
+        resource_type: "characters",
+        resource_id: "Hero",
+        current_version: 2,
+        versions: [
+          {
+            version: 1,
+            filename: "v1.png",
+            created_at: "2026-02-01T00:00:00Z",
+            file_size: 10,
+            is_current: false,
+            prompt: "hero prompt",
+            file_url: "/api/v1/files/demo/versions/characters/Hero_v1.png",
+          },
+          {
+            version: 2,
+            filename: "v2.png",
+            created_at: "2026-02-01T01:00:00Z",
+            file_size: 12,
+            is_current: true,
+            file_url: "/api/v1/files/demo/versions/characters/Hero_v2.png",
+          },
+        ],
+      })
+      .mockResolvedValueOnce({
+        resource_type: "characters",
+        resource_id: "Hero",
+        current_version: 2,
+        versions: [
+          {
+            version: 2,
+            filename: "v2.png",
+            created_at: "2026-02-01T01:00:00Z",
+            file_size: 12,
+            is_current: true,
+            file_url: "/api/v1/files/demo/versions/characters/Hero_v2.png",
+          },
+        ],
+      });
+    const deleteVersion = vi.spyOn(API, "deleteVersion").mockResolvedValue({
+      success: true,
+      deleted_version: 1,
+      current_version: 2,
+    });
+
+    render(
+      <VersionTimeMachine
+        projectName="demo"
+        resourceType="characters"
+        resourceId="Hero"
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /版本/ }));
+    fireEvent.click(await screen.findByRole("button", { name: "v1" }));
+    fireEvent.click(screen.getByRole("button", { name: "删除此版本" }));
+    fireEvent.click(screen.getByRole("button", { name: "删除" }));
+
+    await waitFor(() => {
+      expect(deleteVersion).toHaveBeenCalledWith("demo", "characters", "Hero", 1);
+      expect(API.getVersions).toHaveBeenCalledTimes(2);
+      expect(useAppStore.getState().toast?.text).toBe("已删除 v1");
+      expect(screen.queryByRole("button", { name: "v1" })).not.toBeInTheDocument();
+    });
+  });
+
+  it("does not offer delete for the current version when history remains or type is not typed media", async () => {
+    vi.spyOn(API, "getVersions").mockResolvedValue({
+      resource_type: "storyboards",
+      resource_id: "E1S01",
+      current_version: 1,
+      versions: [
+        {
+          version: 1,
+          filename: "v1.png",
+          created_at: "2026-02-01T00:00:00Z",
+          file_size: 10,
+          is_current: true,
+          file_url: "/api/v1/files/demo/versions/storyboards/v1.png",
+        },
+      ],
+    });
+
+    render(
+      <VersionTimeMachine
+        projectName="demo"
+        resourceType="storyboards"
+        resourceId="E1S01"
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /版本/ }));
+    fireEvent.click(await screen.findByRole("button", { name: "v1" }));
+    expect(screen.getByText("当前")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "删除此版本" })).not.toBeInTheDocument();
+  });
+
+  it("offers delete for the sole current reference video so users can force regenerate", async () => {
+    vi.spyOn(API, "getVersions")
+      .mockResolvedValueOnce({
+        resource_type: "reference_videos",
+        resource_id: "E1U01",
+        current_version: 1,
+        versions: [
+          {
+            version: 1,
+            filename: "v1.mp4",
+            created_at: "2026-02-01T00:00:00Z",
+            file_size: 10,
+            is_current: true,
+            file_url: "/api/v1/files/demo/versions/reference_videos/E1U01_v1.mp4",
+          },
+        ],
+      })
+      .mockResolvedValueOnce({
+        resource_type: "reference_videos",
+        resource_id: "E1U01",
+        current_version: 0,
+        versions: [],
+      });
+    const deleteVersion = vi.spyOn(API, "deleteVersion").mockResolvedValue({
+      success: true,
+      deleted_version: 1,
+      current_version: 0,
+      cleared_current: true,
+      asset_fingerprints: { "reference_videos/E1U01.mp4": 0 },
+    });
+    const onRestore = vi.fn().mockResolvedValue(undefined);
+
+    render(
+      <VersionTimeMachine
+        projectName="demo"
+        resourceType="reference_videos"
+        resourceId="E1U01"
+        onRestore={onRestore}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /版本/ }));
+    fireEvent.click(await screen.findByRole("button", { name: "v1" }));
+    fireEvent.click(screen.getByRole("button", { name: "删除此版本" }));
+    expect(
+      screen.getByText("确定删除当前成片 v1？删除后可重新生成，此操作不可撤销。"),
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "删除" }));
+
+    await waitFor(() => {
+      expect(deleteVersion).toHaveBeenCalledWith("demo", "reference_videos", "E1U01", 1);
+      expect(onRestore).toHaveBeenCalledWith(1);
+      expect(useAppStore.getState().toast?.text).toBe("已删除 v1");
+    });
+  });
+
   it("shows character preview with contain layout so tall images are not cropped", async () => {
     vi.spyOn(API, "getVersions").mockResolvedValue({
       resource_type: "characters",

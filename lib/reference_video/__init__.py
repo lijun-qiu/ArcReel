@@ -9,6 +9,7 @@ from lib.reference_video.draft_validation import (
     validate_dialogue_load,
     validate_source_text_anchor,
     validate_unit_text,
+    validate_visual_density,
     violation_items,
 )
 from lib.reference_video.duration_migration import (
@@ -30,6 +31,7 @@ from lib.reference_video.script_preview import (
 )
 from lib.reference_video.text_parser import (
     derive_references_from_text,
+    extract_mention_refs,
     extract_mentions,
     line_speech_marks,
     render_mentions_as_subjects,
@@ -56,6 +58,7 @@ __all__ = [
     "derive_utterances",
     "derive_voice_bindings",
     "dialogue_speakers",
+    "extract_mention_refs",
     "extract_mentions",
     "find_reference_unit",
     "line_speech_marks",
@@ -71,5 +74,6 @@ __all__ = [
     "validate_dialogue_load",
     "validate_source_text_anchor",
     "validate_unit_text",
+    "validate_visual_density",
     "violation_items",
 ]

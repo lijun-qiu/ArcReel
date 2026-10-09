@@ -37,11 +37,12 @@ mcp__arcreel__patch_project({"overview": {"genre": "悬疑", "theme": "复仇与
 **三种调用形态三选一**：传 `{"table", "entries"}` 走资产 upsert，传 `{"settings"}` 走顶层字段写入，
 传 `{"overview"}` 走项目概述编辑；同时给出多个或都不给会被拒。`settings` 白名单字段：
 
-- `episode_target_units`：`int >= 1` 设置 / `null` 清除。每集目标体量（按 `source_language` 解读为阅读单位），分集规划工具按它把握每集切分体量
+- `episode_target_units`：`int >= 1` 设置 / `null` 清除。每集目标体量（按 `source_language` 解读为阅读单位），分集规划工具按它把握每集切分体量。规划前**不要**主动 AskUserQuestion 是否设置；`planning_split_mode=markers` 时尤其不要问（标记切点不靠体量）
 - `source_language`：`"zh" / "en" / "vi"` 设置 / `null` 清除。优先级：**用户显式配置 > 自动推断**——用户明确指定语言时即可写入（不限于 overview 跳过或失败的场景）；无用户显式确认时不要自行猜测写入，正常路径由 overview 生成自动落盘。发现显式配置与自动推断 / 源文实际语言不一致时，提醒用户（WARN）并按显式配置继续，不阻塞流程
 - `brief`：字符串设置 / `null` 清除。创作诉求短文本，仅广告/短片项目（`content_mode=ad`）可写，其他项目类型写入会被拒
-- `planning_window_chars`：`int >= 1` 设置 / `null` 清除回内部默认。分集规划单批读取的源文窗口字符数
-- `planning_max_episodes`：`int >= 1` 设置 / `null` 清除回内部默认。分集规划单批最多产出的集数
+- `planning_window_chars`：`int >= 1` 设置 / `null` 清除回内部默认（当前默认 20000）。分集规划单批读取的源文窗口字符数；也可在工作台顶栏调整
+- `planning_max_episodes`：`int >= 1` 设置 / `null` 清除回内部默认（当前默认 20）。分集规划单批最多产出的集数；也可在工作台顶栏调整
+- `planning_split_mode`：`"llm" / "markers"` 设置 / `null` 清除回 `llm`。`llm`=智能切（调用文本模型）；`markers`=按源文「第N集/章/回/节/卷」或「场景N」标题行（`#` / `*` 均可）规则切（不调文本模型）。也可在工作台顶栏切换；标记模式下用户可点「执行切分」一键写入账本。项目里**已有** `llm`/`markers` 时规划直接沿用、不要再问切分路线；仅字段缺失时才问（或本轮用户已选定 / 全自主 / `auto_confirm_step1` 则不问）
 - `narration_voice`：非空字符串（音色 id 照供应商文档）设置 / `null` 清除。项目级旁白音色覆盖，优先于全局设置生效，只影响当前项目
 - `narration_speed`：正的有限数值（如 `1.2`）设置 / `null` 清除。项目级旁白语速覆盖，优先于全局设置生效，只影响当前项目
 

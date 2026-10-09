@@ -9,7 +9,17 @@ import {
   lookupDurationConstraints,
   lookupProjectVideoResolution,
   lookupVideoAudioControl,
+  preferredVideoResolution,
 } from "./provider-models";
+
+describe("preferredVideoResolution", () => {
+  it("prefers 480p, then 720p, then the first option", () => {
+    expect(preferredVideoResolution(["720p", "480p", "1080p"])).toBe("480p");
+    expect(preferredVideoResolution(["720p", "1080p"])).toBe("720p");
+    expect(preferredVideoResolution(["1080p", "4K"])).toBe("1080p");
+    expect(preferredVideoResolution([])).toBeNull();
+  });
+});
 
 describe("provider-models fetchers", () => {
   beforeEach(() => {

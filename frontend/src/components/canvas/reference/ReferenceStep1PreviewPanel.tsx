@@ -54,7 +54,9 @@ interface DisplayUnit {
 function unitStats(scriptText: string, lookup: MentionLookup): { utterances: number } {
   const lines = toScriptLines(scriptText, lookup);
   return {
-    utterances: lines.filter((l) => l.kind === "dialogue" || l.kind === "voiceover").length,
+    utterances: lines.filter(
+      (l) => l.kind === "dialogue" || l.kind === "inner_monologue" || l.kind === "voiceover",
+    ).length,
   };
 }
 
@@ -317,6 +319,7 @@ function selectUnitsContent(state: ScriptReviewState): ReferenceStep1Draft | nul
 export function ReferenceStep1PreviewPanel({ projectName, episode, lookup }: ReferenceStep1PreviewPanelProps) {
   const { t } = useTranslation("dashboard");
   const pushToast = useAppStore((s) => s.pushToast);
+  const autoConfirmStep1 = useProjectsStore((s) => s.currentProjectData?.auto_confirm_step1 === true);
 
   const [editingUnitKey, setEditingUnitKey] = useState<string | null>(null);
 
@@ -505,7 +508,9 @@ export function ReferenceStep1PreviewPanel({ projectName, episode, lookup }: Ref
                   <span> — {t("reference_step1_click_to_locate")}</span>
                 </>
               ) : confirmed ? (
-                t("dashboard:review_confirmed_hint")
+                autoConfirmStep1
+                  ? t("dashboard:review_auto_confirmed_hint")
+                  : t("dashboard:review_confirmed_hint")
               ) : (
                 t("dashboard:review_pending_hint")
               )}

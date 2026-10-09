@@ -1,8 +1,15 @@
 import { useTranslation } from "react-i18next";
 import { EditableEpisodeTitle } from "@/components/canvas/EditableEpisodeTitle";
+import {
+  EpisodePreviewActions,
+  type EpisodePreviewPlayback,
+  type EpisodePreviewSubtitleCue,
+} from "@/components/canvas/shared/EpisodePreviewActions";
 import type { EpisodeMeta } from "@/types";
 import type { EpisodeCost } from "@/types";
 import { totalBreakdown, currentScriptBreakdown, formatCost } from "@/utils/cost-format";
+
+export type { EpisodePreviewPlayback, EpisodePreviewSubtitleCue };
 
 interface EpisodeHeaderProps {
   ep: EpisodeMeta;
@@ -11,10 +18,20 @@ interface EpisodeHeaderProps {
   episodeCost?: EpisodeCost;
   onSaveTitle?: (next: string) => Promise<void>;
   canEditTitle?: boolean;
+  /** 本集镜头均已有视频时才可合成预览。 */
+  canComposePreview?: boolean;
+  onComposePreview?: () => Promise<EpisodePreviewPlayback>;
+  onUpscalePreview?: () => Promise<EpisodePreviewPlayback>;
+  onWatchPreview?: () => Promise<EpisodePreviewPlayback | null>;
+  onWatchUpscaled?: () => Promise<EpisodePreviewPlayback | null>;
+  episodePreviewUrl?: string | null;
+  episodeUpscaledUrl?: string | null;
+  episodePreviewSubtitlesWebvtt?: string | null;
+  episodePreviewSubtitles?: EpisodePreviewSubtitleCue[];
 }
 
 /**
- * 集卡片头部：EP·xx 徽标 + 集名（display-serif）+ 状态行 + 三列费用统计（预估/已花/剩余）。
+ * 集卡片头部：EP·xx 徽标 + 集名（display-serif）+ 状态行 + 预览/超分 + 三列费用统计。
  */
 export function EpisodeHeader({
   ep,
@@ -23,6 +40,15 @@ export function EpisodeHeader({
   episodeCost,
   onSaveTitle,
   canEditTitle,
+  canComposePreview = false,
+  onComposePreview,
+  onUpscalePreview,
+  onWatchPreview,
+  onWatchUpscaled,
+  episodePreviewUrl = null,
+  episodeUpscaledUrl = null,
+  episodePreviewSubtitlesWebvtt = null,
+  episodePreviewSubtitles = [],
 }: EpisodeHeaderProps) {
   const { t } = useTranslation("dashboard");
   const isActive = ep.status === "in_production";
@@ -39,6 +65,12 @@ export function EpisodeHeader({
   for (const [c, v] of Object.entries(estimateBreakdown)) {
     remainingBreakdown[c] = Math.max(0, v - (currentScriptActual[c] ?? 0));
   }
+
+  const showPreview =
+    Boolean(onComposePreview) ||
+    Boolean(onWatchPreview) ||
+    Boolean(onUpscalePreview) ||
+    Boolean(onWatchUpscaled);
 
   return (
     <div
@@ -99,25 +131,42 @@ export function EpisodeHeader({
         />
       </div>
 
-      {episodeCost && (
-        <div className="flex shrink-0 items-stretch gap-0">
-          <CostStat
-            label={t("episode_header_cost_estimated")}
-            value={formatCost(estimateBreakdown)}
+      <div className="flex shrink-0 flex-wrap items-stretch gap-3">
+        {showPreview ? (
+          <EpisodePreviewActions
+            episode={ep.episode}
+            canCompose={canComposePreview}
+            onComposePreview={onComposePreview}
+            onUpscalePreview={onUpscalePreview}
+            onWatchPreview={onWatchPreview}
+            onWatchUpscaled={onWatchUpscaled}
+            episodePreviewUrl={episodePreviewUrl}
+            episodeUpscaledUrl={episodeUpscaledUrl}
+            episodePreviewSubtitlesWebvtt={episodePreviewSubtitlesWebvtt}
+            episodePreviewSubtitles={episodePreviewSubtitles}
           />
-          <CostStat
-            label={t("episode_header_cost_spent")}
-            value={formatCost(actualBreakdown)}
-            withBorder
-          />
-          <CostStat
-            label={t("episode_header_cost_remaining")}
-            value={formatCost(remainingBreakdown)}
-            accent
-            withBorder
-          />
-        </div>
-      )}
+        ) : null}
+
+        {episodeCost && (
+          <div className="flex shrink-0 items-stretch gap-0">
+            <CostStat
+              label={t("episode_header_cost_estimated")}
+              value={formatCost(estimateBreakdown)}
+            />
+            <CostStat
+              label={t("episode_header_cost_spent")}
+              value={formatCost(actualBreakdown)}
+              withBorder
+            />
+            <CostStat
+              label={t("episode_header_cost_remaining")}
+              value={formatCost(remainingBreakdown)}
+              accent
+              withBorder
+            />
+          </div>
+        )}
+      </div>
     </div>
   );
 }

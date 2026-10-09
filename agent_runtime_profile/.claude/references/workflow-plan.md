@@ -76,6 +76,7 @@ mcp__arcreel__get_workflow_plan({
 | `collect_project_input` | 引导用户在 Web 端补齐项目输入 |
 | `draft_selling_points` | 起草卖点后经 `mcp__arcreel__patch_project` 写回（ad） |
 | `analyze_assets` | dispatch `analyze-assets` 子任务 |
+| `propose_character_looks` | dispatch `propose-character-looks` 子任务（仅 reference_video：本集拆 unit 前审查造型 / 场景 / 道具完备性） |
 | `reset_episode_planning` | `mcp__arcreel__reset_episode_planning`，按 `next_action.args` 传参 |
 | `plan_episodes` | `mcp__arcreel__plan_episodes` |
 | `prepare_step1` | dispatch `next_action.args.preprocessor` 指名的子任务 |

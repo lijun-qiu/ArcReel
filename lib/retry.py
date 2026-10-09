@@ -12,7 +12,7 @@ import asyncio
 import functools
 import logging
 import random
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 
 logger = logging.getLogger(__name__)
 
@@ -71,35 +71,59 @@ def _should_retry(exc: Exception, retryable_errors: tuple[type[Exception], ...])
 
 
 def with_retry_async(
-    max_attempts: int = DEFAULT_MAX_ATTEMPTS,
+    max_attempts: int | None = DEFAULT_MAX_ATTEMPTS,
     backoff_seconds: tuple[int, ...] = DEFAULT_BACKOFF_SECONDS,
     retryable_errors: tuple[type[Exception], ...] = BASE_RETRYABLE_ERRORS,
     retry_if: Callable[[Exception], bool] | None = None,
+    on_retry: Callable[[Exception, int, float], Awaitable[None] | None] | None = None,
 ):
     """异步函数重试装饰器，带指数退避和随机抖动。
 
     当指定 retry_if 时，用该谓词替代默认的 _should_retry 进行重试判定，
     允许调用方精确控制哪些异常应当重试（如仅重试特定 HTTP 状态码）。
+    ``max_attempts=None`` 表示对可重试错误持续重试直至成功（或任务被取消）。
+    ``on_retry(exc, attempt_1based, wait_seconds)`` 在决定重试后、sleep 前调用（可选），
+    用于写回排队提示等副作用；回调异常只记日志，不打断重试。
     """
+
+    if max_attempts is not None and max_attempts < 1:
+        raise ValueError(f"max_attempts must be >= 1 or None, got {max_attempts!r}")
 
     predicate = retry_if if retry_if is not None else lambda e: _should_retry(e, retryable_errors)
 
     def decorator(func):
         @functools.wraps(func)
         async def wrapper(*args, **kwargs):
-            for attempt in range(max_attempts):
+            attempt = 0
+            while True:
                 try:
                     return await func(*args, **kwargs)
                 except Exception as e:
-                    is_last = attempt >= max_attempts - 1
+                    limited = max_attempts is not None
+                    is_last = limited and attempt >= max_attempts - 1
                     if is_last or isinstance(e, NonRetryableError) or not predicate(e):
                         raise
                     wait_time = _compute_wait(attempt, backoff_seconds)
                     logger.warning("API 调用异常: %s - %s", type(e).__name__, str(e)[:200])
-                    logger.warning("重试 %d/%d, %.1f 秒后...", attempt + 1, max_attempts - 1, wait_time)
+                    if limited:
+                        assert max_attempts is not None
+                        logger.warning(
+                            "重试 %d/%d, %.1f 秒后...",
+                            attempt + 1,
+                            max_attempts - 1,
+                            wait_time,
+                        )
+                    else:
+                        logger.warning("重试 %d（持续至成功）, %.1f 秒后...", attempt + 1, wait_time)
+                    if on_retry is not None:
+                        try:
+                            maybe = on_retry(e, attempt + 1, wait_time)
+                            if maybe is not None:
+                                await maybe
+                        except Exception:
+                            logger.warning("on_retry 回调失败", exc_info=True)
                     await asyncio.sleep(wait_time)
-
-            raise RuntimeError(f"with_retry_async: max_attempts={max_attempts}，未执行任何尝试")
+                    attempt += 1
 
         return wrapper
 

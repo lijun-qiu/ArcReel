@@ -24,9 +24,12 @@ MESSAGES: dict[str, str] = {
     "template_name_live_wong": "王家卫",
     "template_name_live_shaw": "邵氏武侠",
     "template_name_live_cyberpunk": "真人赛博朋克",
-    # ===== Anim names (18) =====
+    # ===== Anim names (21) =====
     "template_name_anim_3d_cg": "3D 游戏 CG",
     "template_name_anim_cn_3d": "国风 3D",
+    "template_name_anim_cn_short_drama": "半写实 3D 短剧",
+    "template_name_anim_cn_2d_drama": "国漫 2D 短剧",
+    "template_name_anim_cn_idol_manhua": "都市国漫偶像",
     "template_name_anim_kyoto": "商业动画 京都",
     "template_name_anim_arcane": "油画三渲二",
     "template_name_anim_us_3d": "美式 3D 动画",
@@ -62,9 +65,12 @@ MESSAGES: dict[str, str] = {
     "template_tagline_live_wong": "胶片颗粒 · 东方都市",
     "template_tagline_live_shaw": "港式武侠 · 电影感",
     "template_tagline_live_cyberpunk": "电影质感 · 极致高清",
-    # ===== Anim taglines (18) =====
+    # ===== Anim taglines (21) =====
     "template_tagline_anim_3d_cg": "影视级 · 虚幻引擎",
     "template_tagline_anim_cn_3d": "影视级 · 虚幻引擎",
+    "template_tagline_anim_cn_short_drama": "柔光偶像 · 16:9 漫剧",
+    "template_tagline_anim_cn_2d_drama": "硬描边 · 赛璐璐平涂",
+    "template_tagline_anim_cn_idol_manhua": "V脸花美男 · 2D插画",
     "template_tagline_anim_kyoto": "柔和赛璐珞 · 石立太一",
     "template_tagline_anim_arcane": "双城之战 · Arcane",
     "template_tagline_anim_us_3d": "影视级 · 皮克斯",

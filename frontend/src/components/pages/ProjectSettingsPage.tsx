@@ -13,7 +13,14 @@ import { executingImageModel, executingVideoModel } from "@/components/shared/La
 import { ProviderModelSelect } from "@/components/ui/ProviderModelSelect";
 import { StylePicker, type StylePickerValue } from "@/components/shared/StylePicker";
 import { DEFAULT_TEMPLATE_ID, STYLE_TEMPLATES } from "@/data/style-templates";
-import type { CustomProviderInfo, ProviderInfo } from "@/types";
+import type {
+  CustomProviderInfo,
+  LocalH3Path,
+  LocalH3Quant,
+  LocalH3Settings,
+  LocalH3StepMode,
+  ProviderInfo,
+} from "@/types";
 import { useModelCandidates } from "@/hooks/useModelCandidates";
 import { ROUTE_META, RouteLockBadge } from "@/components/shared/GenerationRouteCards";
 import { GridStoryboardBar } from "@/components/shared/GridStoryboardBar";
@@ -23,6 +30,40 @@ import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { useWarnUnsaved } from "@/hooks/useWarnUnsaved";
 import { normalizeRoute, type GenerationRoute } from "@/utils/generation-mode";
 import { getProjectDisplayName } from "@/utils/project-display";
+
+const DEFAULT_LOCAL_H3: LocalH3Settings = {
+  quant: "int8",
+  path: "ref2v",
+  step_mode: "manual",
+  steps: 12,
+};
+const LOCAL_H3_QUANTS: LocalH3Quant[] = ["int8", "fp8", "gguf"];
+const LOCAL_H3_PATHS: LocalH3Path[] = ["ref2v", "fl2v"];
+const LOCAL_H3_STEP_MODES: LocalH3StepMode[] = ["manual", "distill_8", "distill_4"];
+
+function stepsForMode(mode: LocalH3StepMode, stepsRaw: unknown): number {
+  if (mode === "distill_8") return 8;
+  if (mode === "distill_4") return 4;
+  if (typeof stepsRaw === "number" && Number.isFinite(stepsRaw)) {
+    return Math.min(40, Math.max(4, Math.round(stepsRaw)));
+  }
+  return DEFAULT_LOCAL_H3.steps;
+}
+
+function normalizeLocalH3(raw: unknown): LocalH3Settings {
+  if (!raw || typeof raw !== "object") return { ...DEFAULT_LOCAL_H3 };
+  const obj = raw as Record<string, unknown>;
+  const quant = LOCAL_H3_QUANTS.includes(obj.quant as LocalH3Quant)
+    ? (obj.quant as LocalH3Quant)
+    : DEFAULT_LOCAL_H3.quant;
+  const path = LOCAL_H3_PATHS.includes(obj.path as LocalH3Path)
+    ? (obj.path as LocalH3Path)
+    : DEFAULT_LOCAL_H3.path;
+  const step_mode = LOCAL_H3_STEP_MODES.includes(obj.step_mode as LocalH3StepMode)
+    ? (obj.step_mode as LocalH3StepMode)
+    : DEFAULT_LOCAL_H3.step_mode;
+  return { quant, path, step_mode, steps: stepsForMode(step_mode, obj.steps) };
+}
 
 function deriveStyleValue(project: Record<string, unknown>, projectName: string): StylePickerValue {
   const styleImage = project.style_image as string | undefined;
@@ -167,6 +208,7 @@ export function ProjectSettingsPage() {
   const [videoResolution, setVideoResolution] = useState<string | null>(null);
   const [imageResolution, setImageResolution] = useState<string | null>(null);
   const [modelSettings, setModelSettings] = useState<Record<string, { resolution: string | null }>>({});
+  const [localH3, setLocalH3] = useState<LocalH3Settings>(DEFAULT_LOCAL_H3);
   const [providers, setProviders] = useState<ProviderInfo[]>([]);
   const [customProviders, setCustomProviders] = useState<CustomProviderInfo[]>([]);
   const [projectTitle, setProjectTitle] = useState<string>("");
@@ -194,6 +236,7 @@ export function ProjectSettingsPage() {
     speechRate: null as number | null,
     videoResolution: null as string | null,
     imageResolution: null as string | null,
+    localH3: DEFAULT_LOCAL_H3 as LocalH3Settings,
   });
   // 风格区独立保存，但"未保存就离开"也需被 isDirty 拦截。
   const initialStyleRef = useRef<StylePickerValue | null>(null);
@@ -326,6 +369,8 @@ export function ProjectSettingsPage() {
       setVideoResolution(vRes);
       setImageResolution(iRes);
       setModelSettings(ms);
+      const nextLocalH3 = normalizeLocalH3(project.local_h3);
+      setLocalH3(nextLocalH3);
 
       const derivedStyle = deriveStyleValue(project, projectName);
       setStyleValue(derivedStyle);
@@ -338,6 +383,7 @@ export function ProjectSettingsPage() {
         textDefault: td, textSimple: tsi, textComplex: tcx,
         aspectRatio: ar, gridStoryboard: grid, defaultDuration: dd, speechRate: sr,
         videoResolution: vRes, imageResolution: iRes,
+        localH3: nextLocalH3,
       };
     }));
 
@@ -395,6 +441,10 @@ export function ProjectSettingsPage() {
     speechRate !== initialRef.current.speechRate ||
     videoResolution !== initialRef.current.videoResolution ||
     imageResolution !== initialRef.current.imageResolution ||
+    localH3.quant !== initialRef.current.localH3.quant ||
+    localH3.path !== initialRef.current.localH3.path ||
+    localH3.step_mode !== initialRef.current.localH3.step_mode ||
+    localH3.steps !== initialRef.current.localH3.steps ||
     styleIsDirty;
   /* eslint-enable react-hooks/refs */
 
@@ -513,6 +563,7 @@ export function ProjectSettingsPage() {
         // ad 项目禁写 default_duration（后端对字段出现本身返回 400），省略该键
         ...(contentMode === "ad" ? {} : { default_duration: defaultDuration }),
         model_settings: newModelSettings,
+        local_h3: localH3,
       });
       setModelSettings(newModelSettings);
       setNarrationVoice(trimmedVoice);
@@ -523,6 +574,7 @@ export function ProjectSettingsPage() {
         textDefault, textSimple, textComplex,
         aspectRatio, gridStoryboard, defaultDuration, speechRate,
         videoResolution, imageResolution,
+        localH3,
       };
       // grid_storyboard / video_backend 落盘后，/video-capabilities 按已存值解析——查询 key 未变
       // 不会自动重取，需显式失效（同 MediaModelSection 保存流程）。
@@ -533,7 +585,7 @@ export function ProjectSettingsPage() {
     } finally {
       setSaving(false);
     }
-  }, [modelSettings, videoBackend, videoProviderI2V, videoProviderR2V, imageBackendDefault, imageBackendT2I, imageBackendI2I, audioOverride, audioBackend, narrationVoice, narrationSpeed, textDefault, textSimple, textComplex, aspectRatio, generationRoute, gridStoryboard, gridToggleVisible, defaultDuration, speechRate, contentMode, videoResolution, imageResolution, projectName, t, globalDefaults]);
+  }, [modelSettings, videoBackend, videoProviderI2V, videoProviderR2V, imageBackendDefault, imageBackendT2I, imageBackendI2I, audioOverride, audioBackend, narrationVoice, narrationSpeed, textDefault, textSimple, textComplex, aspectRatio, generationRoute, gridStoryboard, gridToggleVisible, defaultDuration, speechRate, contentMode, videoResolution, imageResolution, localH3, projectName, t, globalDefaults]);
 
   const handleResetAgentProfile = useCallback(async () => {
     if (profileResetProject !== projectName) {
@@ -778,6 +830,105 @@ export function ProjectSettingsPage() {
                   usesReferenceImages={generationRoute === "reference_video"}
                   enable={contentMode === "ad" ? { duration: false } : undefined}
                 />
+              </SectionCard>
+
+              <SectionCard kicker="Local H3" title={t("local_h3_title")}>
+                <p className="mb-3 text-[12px] leading-relaxed text-text-3">
+                  {t("local_h3_hint")}
+                </p>
+                <fieldset className="mb-3">
+                  <legend className="mb-2 block font-mono text-[10px] font-bold uppercase tracking-[0.14em] text-text-3">
+                    {t("local_h3_path_label")}
+                  </legend>
+                  <div className="flex flex-wrap gap-2">
+                    {LOCAL_H3_PATHS.map((p) => (
+                      <label key={p} className={radioCardClass(localH3.path === p)}>
+                        <input
+                          type="radio"
+                          name="localH3Path"
+                          value={p}
+                          checked={localH3.path === p}
+                          onChange={() => setLocalH3((prev) => ({ ...prev, path: p }))}
+                          className="sr-only"
+                        />
+                        <span className="text-[12px]">{t(`local_h3_path_${p}`)}</span>
+                      </label>
+                    ))}
+                  </div>
+                </fieldset>
+                <fieldset className="mb-3">
+                  <legend className="mb-2 block font-mono text-[10px] font-bold uppercase tracking-[0.14em] text-text-3">
+                    {t("local_h3_quant_label")}
+                  </legend>
+                  <div className="flex flex-wrap gap-2">
+                    {LOCAL_H3_QUANTS.map((q) => (
+                      <label key={q} className={radioCardClass(localH3.quant === q)}>
+                        <input
+                          type="radio"
+                          name="localH3Quant"
+                          value={q}
+                          checked={localH3.quant === q}
+                          onChange={() => setLocalH3((prev) => ({ ...prev, quant: q }))}
+                          className="sr-only"
+                        />
+                        <span className="font-mono text-[12px] uppercase">{q}</span>
+                      </label>
+                    ))}
+                  </div>
+                </fieldset>
+                <fieldset className="mb-3">
+                  <legend className="mb-2 block font-mono text-[10px] font-bold uppercase tracking-[0.14em] text-text-3">
+                    {t("local_h3_step_mode_label")}
+                  </legend>
+                  <div className="flex flex-wrap gap-2">
+                    {LOCAL_H3_STEP_MODES.map((mode) => (
+                      <label key={mode} className={radioCardClass(localH3.step_mode === mode)}>
+                        <input
+                          type="radio"
+                          name="localH3StepMode"
+                          value={mode}
+                          checked={localH3.step_mode === mode}
+                          onChange={() =>
+                            setLocalH3((prev) => ({
+                              ...prev,
+                              step_mode: mode,
+                              steps: stepsForMode(mode, prev.steps),
+                            }))
+                          }
+                          className="sr-only"
+                        />
+                        <span className="text-[12px]">{t(`local_h3_step_mode_${mode}`)}</span>
+                      </label>
+                    ))}
+                  </div>
+                </fieldset>
+                {localH3.step_mode === "manual" ? (
+                  <label className="block">
+                    <span className="mb-1.5 block font-mono text-[10px] font-bold uppercase tracking-[0.14em] text-text-3">
+                      {t("local_h3_steps_label")}
+                    </span>
+                    <input
+                      type="number"
+                      min={4}
+                      max={40}
+                      value={localH3.steps}
+                      onChange={(e) => {
+                        const n = Number(e.target.value);
+                        if (!Number.isFinite(n)) return;
+                        setLocalH3((prev) => ({
+                          ...prev,
+                          steps: Math.min(40, Math.max(4, Math.round(n))),
+                        }));
+                      }}
+                      className="w-24 rounded-md border border-[var(--color-hairline)] bg-[oklch(0.18_0.01_265)] px-2.5 py-1.5 font-mono text-sm text-text"
+                    />
+                  </label>
+                ) : (
+                  <p className="font-mono text-[12px] text-text-3">
+                    {t("local_h3_steps_locked", { steps: localH3.steps })}
+                  </p>
+                )}
+                <p className="mt-2 text-[11px] text-text-4">{t("local_h3_weights_hint")}</p>
               </SectionCard>
 
               {/* Aspect ratio */}

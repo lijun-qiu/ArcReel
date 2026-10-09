@@ -49,6 +49,10 @@ class TestRegistryHit:
         assert pricing.currency == "CNY"
 
     def test_agnes_text_per_token(self):
+        pricing_30 = lookup_pricing("agnes", "agnes-3.0-flash", "text")
+        assert isinstance(pricing_30, PerToken)
+        assert pricing_30.currency == "USD"
+        assert pricing_30.rates["agnes-3.0-flash"] == {"input": 0.05, "output": 0.15}
         for model_id in ("agnes-2.5-flash", "agnes-2.0-flash"):
             pricing = lookup_pricing("agnes", model_id, "text")
             assert isinstance(pricing, PerToken)
@@ -135,7 +139,7 @@ class TestUnknownModelFallback:
         with caplog.at_level(logging.WARNING, logger="lib.pricing.lookup"):
             pricing = lookup_pricing("agnes", "agnes-2.0-unregistered", "text")
         assert isinstance(pricing, PerToken)
-        assert pricing.rates["agnes-2.5-flash"] == {"input": 0.03, "output": 0.15}
+        assert pricing.rates["agnes-3.0-flash"] == {"input": 0.05, "output": 0.15}
 
     def test_agent_plan_no_pricing_falls_back_to_gemini_quietly(self, caplog):
         with caplog.at_level(logging.WARNING, logger="lib.pricing.lookup"):

@@ -34,7 +34,8 @@ from lib.config.service import (
     _DEFAULT_IMAGE_BACKEND,
     _DEFAULT_REFERENCE_SINGLE_MAX_BYTES,
     _DEFAULT_REFERENCE_TOTAL_MAX_BYTES,
-    _DEFAULT_TEXT_BACKEND,
+    _DEFAULT_TEXT_BACKEND_COMPLEX,
+    _DEFAULT_TEXT_BACKEND_SIMPLE,
     _DEFAULT_VIDEO_BACKEND,
     ConfigService,
 )
@@ -341,11 +342,15 @@ _TEXT_TIER_SETTING_KEYS: dict[TextTaskTier, str] = {
 
 
 # 文本档位（docs/adr/0051）键位。档位即桶，项目级与全局同名同构，故桶层两侧同键；默认层
-# 两侧同用 default_text_backend。
+# 两侧同用 default_text_backend。码级兜底：简单 Flash / 复杂 Pro（魔搭）。
+_TEXT_TIER_CODE_DEFAULTS: dict[TextTaskTier, str] = {
+    TextTaskTier.SIMPLE: _DEFAULT_TEXT_BACKEND_SIMPLE,
+    TextTaskTier.COMPLEX: _DEFAULT_TEXT_BACKEND_COMPLEX,
+}
 _TEXT_LAYERED_KEYS: dict[TextTaskTier, _LayeredBackendKeys] = {
     tier: _LayeredBackendKeys(
         media_type="text",
-        parse_fallback=_DEFAULT_TEXT_BACKEND,
+        parse_fallback=_TEXT_TIER_CODE_DEFAULTS[tier],
         project_bucket_key=tier_key,
         project_default_key="default_text_backend",
         global_bucket_key=tier_key,
@@ -1085,6 +1090,9 @@ class ConfigResolver:
             raw = settings.get(keys.global_default_key, "")
             if "/" in raw:
                 return ConfigService._parse_backend(raw, keys.parse_fallback)
+        # 文本档位：全局桶与默认均空时用档位硬编码（简单 Flash / 复杂 Pro），再落到自动推断。
+        if keys.media_type == "text" and "/" in keys.parse_fallback:
+            return ConfigService._parse_backend(keys.parse_fallback, keys.parse_fallback)
         return await self._auto_resolve_backend(svc, session, keys.media_type)
 
     async def _resolve_image_provider_model(

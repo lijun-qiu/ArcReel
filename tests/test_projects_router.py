@@ -1150,6 +1150,55 @@ class TestProjectsRouter:
             assert seg2["props"] == []
 
     @pytest.mark.unit
+    def test_update_paths_write_use_previous_storyboard(self, tmp_path, monkeypatch):
+        fake_pm = _FakePM(tmp_path)
+        fake_pm.scripts[("ready", "narration.json")] = {
+            "content_mode": "narration",
+            "segments": [{"segment_id": "E1S01", "duration_seconds": 4}],
+        }
+        fake_pm.scripts[("ready", "episode_1.json")] = {
+            "content_mode": "drama",
+            "scenes": [{"scene_id": "001", "duration_seconds": 8}],
+        }
+        fake_pm.scripts[("ad-ready", "episode_1.json")] = self._ad_script(["E1S01"])
+        client = _client(monkeypatch, fake_pm)
+
+        with client:
+            narration = client.patch(
+                "/api/v1/projects/ready/segments/E1S01",
+                json={"script_file": "narration.json", "use_previous_storyboard": False},
+            )
+            assert narration.status_code == 200
+            assert narration.json()["segment"]["use_previous_storyboard"] is False
+
+            drama = client.patch(
+                "/api/v1/projects/ready/script-scenes/001",
+                json={
+                    "script_file": "episode_1.json",
+                    "updates": {"use_previous_storyboard": False},
+                },
+            )
+            assert drama.status_code == 200
+            assert drama.json()["scene"]["use_previous_storyboard"] is False
+
+            ad = client.patch(
+                "/api/v1/projects/ad-ready/script-shots/E1S01",
+                json={
+                    "script_file": "episode_1.json",
+                    "updates": {"use_previous_storyboard": False},
+                },
+            )
+            assert ad.status_code == 200
+            assert ad.json()["shot"]["use_previous_storyboard"] is False
+
+            restored = client.patch(
+                "/api/v1/projects/ready/segments/E1S01",
+                json={"script_file": "narration.json", "use_previous_storyboard": True},
+            )
+            assert restored.status_code == 200
+            assert restored.json()["segment"]["use_previous_storyboard"] is True
+
+    @pytest.mark.unit
     def test_update_segment_allows_unchanged_legacy_mixed_speech(self, tmp_path, monkeypatch):
         fake_pm = _FakePM(tmp_path)
         prompt = {"dialogue": [{"speaker": "Alice", "line": "快走。"}]}
@@ -2098,6 +2147,261 @@ class TestProjectsRouter:
             assert data["audio_backend"] == "dashscope/qwen3-tts-flash"
             assert data["narration_voice"] == "Cherry"
             assert data["narration_speed"] == 1.2
+
+    @pytest.mark.unit
+    def test_update_project_persists_planning_overrides(self, tmp_path, monkeypatch):
+        """PATCH 分集规划窗口/每批集数写入 project.json。"""
+        fake_pm = _FakePM(tmp_path)
+        client = _client(monkeypatch, fake_pm)
+        with client:
+            resp = client.patch(
+                "/api/v1/projects/ready",
+                json={"planning_window_chars": 20000, "planning_max_episodes": 20},
+            )
+            assert resp.status_code == 200
+            data = fake_pm.project_data["ready"]
+            assert data["planning_window_chars"] == 20000
+            assert data["planning_max_episodes"] == 20
+
+    @pytest.mark.unit
+    def test_update_project_clears_planning_overrides(self, tmp_path, monkeypatch):
+        """PATCH null：分集规划覆盖清除，回退工具内部默认。"""
+        fake_pm = _FakePM(tmp_path)
+        fake_pm.project_data["ready"]["planning_window_chars"] = 12000
+        fake_pm.project_data["ready"]["planning_max_episodes"] = 10
+        client = _client(monkeypatch, fake_pm)
+        with client:
+            resp = client.patch(
+                "/api/v1/projects/ready",
+                json={"planning_window_chars": None, "planning_max_episodes": None},
+            )
+            assert resp.status_code == 200
+            data = fake_pm.project_data["ready"]
+            assert "planning_window_chars" not in data
+            assert "planning_max_episodes" not in data
+
+    @pytest.mark.unit
+    def test_update_project_rejects_non_positive_planning_overrides(self, tmp_path, monkeypatch):
+        """PATCH 非正整数分集规划设置返回 422，不落盘。"""
+        fake_pm = _FakePM(tmp_path)
+        client = _client(monkeypatch, fake_pm)
+        with client:
+            resp = client.patch("/api/v1/projects/ready", json={"planning_max_episodes": 0})
+            assert resp.status_code == 422
+            assert "planning_max_episodes" not in fake_pm.project_data["ready"]
+
+    @pytest.mark.unit
+    def test_update_project_persists_planning_split_mode(self, tmp_path, monkeypatch):
+        """PATCH planning_split_mode 写入 / null 清除。"""
+        fake_pm = _FakePM(tmp_path)
+        client = _client(monkeypatch, fake_pm)
+        with client:
+            resp = client.patch("/api/v1/projects/ready", json={"planning_split_mode": "markers"})
+            assert resp.status_code == 200
+            assert fake_pm.project_data["ready"]["planning_split_mode"] == "markers"
+
+            resp = client.patch("/api/v1/projects/ready", json={"planning_split_mode": None})
+            assert resp.status_code == 200
+            assert "planning_split_mode" not in fake_pm.project_data["ready"]
+
+    @pytest.mark.unit
+    def test_update_project_persists_auto_confirm_step1(self, tmp_path, monkeypatch):
+        """PATCH auto_confirm_step1 写入 / null 清除。"""
+        fake_pm = _FakePM(tmp_path)
+        client = _client(monkeypatch, fake_pm)
+        with client:
+            resp = client.patch("/api/v1/projects/ready", json={"auto_confirm_step1": True})
+            assert resp.status_code == 200
+            assert fake_pm.project_data["ready"]["auto_confirm_step1"] is True
+
+            resp = client.patch("/api/v1/projects/ready", json={"auto_confirm_step1": False})
+            assert resp.status_code == 200
+            assert fake_pm.project_data["ready"]["auto_confirm_step1"] is False
+
+            resp = client.patch("/api/v1/projects/ready", json={"auto_confirm_step1": None})
+            assert resp.status_code == 200
+            assert "auto_confirm_step1" not in fake_pm.project_data["ready"]
+
+    @pytest.mark.unit
+    def test_update_project_persists_local_h3(self, tmp_path, monkeypatch):
+        """PATCH local_h3 写入路径/步数模式；蒸馏锁定步数；null 清除；非法 steps 422。"""
+        fake_pm = _FakePM(tmp_path)
+        client = _client(monkeypatch, fake_pm)
+        with client:
+            resp = client.patch(
+                "/api/v1/projects/ready",
+                json={
+                    "local_h3": {
+                        "quant": "int8",
+                        "path": "ref2v",
+                        "step_mode": "manual",
+                        "steps": 12,
+                    }
+                },
+            )
+            assert resp.status_code == 200
+            assert fake_pm.project_data["ready"]["local_h3"] == {
+                "quant": "int8",
+                "path": "ref2v",
+                "step_mode": "manual",
+                "steps": 12,
+            }
+
+            resp = client.patch(
+                "/api/v1/projects/ready",
+                json={
+                    "local_h3": {
+                        "quant": "fp8",
+                        "path": "fl2v",
+                        "step_mode": "distill_8",
+                        "steps": 16,
+                    }
+                },
+            )
+            assert resp.status_code == 200
+            body = fake_pm.project_data["ready"]["local_h3"]
+            assert body["quant"] == "fp8"
+            assert body["path"] == "fl2v"
+            assert body["step_mode"] == "distill_8"
+            assert body["steps"] == 8
+
+            resp = client.patch(
+                "/api/v1/projects/ready",
+                json={
+                    "local_h3": {
+                        "quant": "int8",
+                        "path": "ref2v",
+                        "step_mode": "distill_4",
+                        "steps": 40,
+                    }
+                },
+            )
+            assert resp.status_code == 200
+            assert fake_pm.project_data["ready"]["local_h3"]["steps"] == 4
+
+            resp = client.patch(
+                "/api/v1/projects/ready",
+                json={"local_h3": {"quant": "int8", "path": "ref2v", "step_mode": "manual", "steps": 99}},
+            )
+            assert resp.status_code == 422
+
+            resp = client.patch("/api/v1/projects/ready", json={"local_h3": None})
+            assert resp.status_code == 200
+            assert "local_h3" not in fake_pm.project_data["ready"]
+
+    @pytest.mark.unit
+    def test_plan_by_markers_endpoint_happy(self, tmp_path, monkeypatch):
+        """POST plan-by-markers 调用规则切并返回摘要。"""
+        from lib.episode_planner import EpisodePlanSummary, PlanResult
+
+        fake_pm = _FakePM(tmp_path)
+        fake_pm.project_data["ready"]["episodes"] = []
+        client = _client(monkeypatch, fake_pm)
+
+        class _FakePlanner:
+            def __init__(self, project_path, generator=None, **_kwargs):
+                self.project_path = project_path
+
+            def plan_by_markers(self):
+                fake_pm.project_data["ready"]["episodes"] = [
+                    {"episode": 1, "title": "开局", "hook": "钩子"},
+                ]
+                return PlanResult(
+                    episodes=[
+                        EpisodePlanSummary(
+                            episode=1,
+                            title="开局",
+                            hook="钩子",
+                            reading_units=100,
+                            ledger_status="planned",
+                        )
+                    ],
+                    cursor={"source_file": "source/script.txt", "offset": 10},
+                    source_exhausted=True,
+                    total_planned=1,
+                )
+
+        monkeypatch.setattr("lib.episode_planner.EpisodePlanner", _FakePlanner)
+
+        with client:
+            resp = client.post(
+                "/api/v1/projects/ready/episodes/plan-by-markers",
+                json={"overwrite": False},
+            )
+            assert resp.status_code == 200
+            body = resp.json()
+            assert body["success"] is True
+            assert body["total_planned"] == 1
+            assert body["episodes"][0]["title"] == "开局"
+            assert body["project"]["episodes"][0]["title"] == "开局"
+
+    @pytest.mark.unit
+    def test_plan_by_markers_requires_overwrite_when_episodes_exist(self, tmp_path, monkeypatch):
+        """账本已有集且 overwrite=false 时返回 409。"""
+        fake_pm = _FakePM(tmp_path)
+        client = _client(monkeypatch, fake_pm)
+        with client:
+            resp = client.post(
+                "/api/v1/projects/ready/episodes/plan-by-markers",
+                json={"overwrite": False},
+            )
+            assert resp.status_code == 409
+
+    @pytest.mark.unit
+    def test_plan_by_markers_overwrite_resets_then_plans(self, tmp_path, monkeypatch):
+        """overwrite=true 先重置再规则切。"""
+        from lib.episode_planner import EpisodePlanSummary, PlanResult
+
+        fake_pm = _FakePM(tmp_path)
+        client = _client(monkeypatch, fake_pm)
+        calls: list[str] = []
+
+        def _fake_reset(project_path, *, from_episode, confirm_consumed):
+            calls.append(f"reset:{from_episode}:{confirm_consumed}")
+            fake_pm.project_data["ready"]["episodes"] = []
+            return {"success": True}
+
+        class _FakePlanner:
+            def __init__(self, project_path, generator=None, **_kwargs):
+                pass
+
+            def plan_by_markers(self):
+                calls.append("plan")
+                return PlanResult(
+                    episodes=[
+                        EpisodePlanSummary(
+                            episode=1, title="A", hook="h", reading_units=1, ledger_status="planned"
+                        )
+                    ],
+                    cursor=None,
+                    source_exhausted=True,
+                    total_planned=1,
+                )
+
+        monkeypatch.setattr("lib.episode_reset.reset_episode_planning", _fake_reset)
+        monkeypatch.setattr("lib.episode_planner.EpisodePlanner", _FakePlanner)
+
+        with client:
+            resp = client.post(
+                "/api/v1/projects/ready/episodes/plan-by-markers",
+                json={"overwrite": True},
+            )
+            assert resp.status_code == 200
+            assert calls == ["reset:1:True", "plan"]
+
+    @pytest.mark.unit
+    def test_plan_by_markers_rejects_ad_projects(self, tmp_path, monkeypatch):
+        """广告项目拒绝按标记分集。"""
+        fake_pm = _FakePM(tmp_path)
+        fake_pm.project_data["ready"]["content_mode"] = "ad"
+        fake_pm.project_data["ready"]["episodes"] = []
+        client = _client(monkeypatch, fake_pm)
+        with client:
+            resp = client.post(
+                "/api/v1/projects/ready/episodes/plan-by-markers",
+                json={"overwrite": False},
+            )
+            assert resp.status_code == 400
 
     @pytest.mark.unit
     def test_update_project_clears_narration_overrides(self, tmp_path, monkeypatch):

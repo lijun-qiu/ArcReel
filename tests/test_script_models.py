@@ -147,6 +147,12 @@ class TestScriptModels:
             Utterance(kind="dialogue", speaker="   ", text="空白说话人")
 
     @pytest.mark.unit
+    def test_utterance_inner_monologue_requires_speaker(self):
+        with pytest.raises(ValidationError):
+            Utterance(kind="inner_monologue", text="心声无说话人")
+        assert Utterance(kind="inner_monologue", speaker="王", text="他不会回来。").speaker == "王"
+
+    @pytest.mark.unit
     def test_utterance_voiceover_rejects_speaker(self):
         """kind ⇄ speaker：voiceover 不得带 speaker。"""
         with pytest.raises(ValidationError):

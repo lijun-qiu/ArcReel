@@ -24,7 +24,7 @@ import enum
 import hashlib
 import json
 import logging
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
@@ -448,11 +448,21 @@ def step2_generated(project_path: Path, project: dict[str, Any], episode: int) -
     return (project_path / script_file).exists()
 
 
+def resolve_auto_confirm_step1(project: Mapping[str, Any] | dict[str, Any]) -> bool:
+    """项目是否开启 step1 审片闸自动放行（``auto_confirm_step1 is True``）。
+
+    仅严格布尔 ``True`` 生效；缺省 / null / 其它类型均视为关闭，避免字符串真值化误放行。
+    """
+    return project.get("auto_confirm_step1") is True
+
+
 def review_status(project_path: Path, project: dict[str, Any], episode: int) -> ReviewStatus:
     """派生该集审核状态。
 
-    穷举 {step1 有无 × step2 有无 × step1_review 有无}：
+    穷举 {step1 有无 × step2 有无 × step1_review 有无 × auto_confirm}：
     - 无 step1（或 gate 不适用）：not_applicable / no_step1；
+    - 隔离草稿在场：pending_review（自动确认也不越过 quarantine）；
+    - ``auto_confirm_step1``：正式 step1 存在且未隔离 → 虚拟 confirmed（不写指纹；关开关后无指纹回到待审）；
     - 有确认指纹：与 live step1 内容指纹一致 → confirmed，不一致（step1 改过）→ pending_review；
     - 无确认指纹（存量 / 首次）：已产 step2（存量项目升级前已通过该集）→ grandfather 放行 confirmed，
       避免新 gate 无谓阻塞存量 step2 重跑；未产 step2（feature 后首次产 step1）→ pending_review 待确认。
@@ -468,6 +478,9 @@ def review_status(project_path: Path, project: dict[str, Any], episode: int) -> 
     live = content_fingerprint(path)
     if live is None:
         return "no_step1"
+    # 项目级站立授权：开关本身即显式确认，等价于「本项目不再等人点确认」（见 ADR 0067）。
+    if resolve_auto_confirm_step1(project):
+        return "confirmed"
     stored_fingerprint = stored_review(project, episode).get("fingerprint")
     if stored_fingerprint is not None:
         return "confirmed" if stored_fingerprint == live else "pending_review"

@@ -67,17 +67,25 @@ const CredentialRow = memo(function CredentialRow({
   onChanged,
 }: RowProps) {
   const { t } = useTranslation("dashboard");
+  const isAgnes = providerId === "agnes";
+  const usesKeyPool = isAgnes;
   const [editing, setEditing] = useState(false);
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<ProviderTestResult | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [saving, setSaving] = useState(false);
-  // secrets 留空表示保留现有值；逐字段独立编辑。
-  const [draft, setDraft] = useState<{ name: string; base_url: string; secrets: Record<string, string> }>({
+  // secrets 留空表示保留现有值；逐字段独立编辑。Agnes 的 apiKeysText 同理。
+  const [draft, setDraft] = useState<{
+    name: string;
+    base_url: string;
+    secrets: Record<string, string>;
+    apiKeysText: string;
+  }>({
     name: cred.name,
     base_url: cred.base_url ?? "",
     secrets: {},
+    apiKeysText: "",
   });
 
   const labelFor = useCallback((field: CredentialSecretField): string => secretFieldLabel(t, field), [t]);
@@ -121,9 +129,13 @@ const CredentialRow = memo(function CredentialRow({
   const handleSaveEdit = useCallback(async () => {
     const data: Record<string, string> = {};
     if (draft.name && draft.name !== cred.name) data.name = draft.name;
-    for (const field of secretFields) {
-      const val = draft.secrets[field.key]?.trim();
-      if (val) data[field.key] = val;
+    if (usesKeyPool) {
+      if (draft.apiKeysText.trim()) data.api_keys_text = draft.apiKeysText;
+    } else {
+      for (const field of secretFields) {
+        const val = draft.secrets[field.key]?.trim();
+        if (val) data[field.key] = val;
+      }
     }
     if (draft.base_url !== (cred.base_url ?? "")) data.base_url = draft.base_url;
     if (Object.keys(data).length === 0) {
@@ -138,9 +150,10 @@ const CredentialRow = memo(function CredentialRow({
     } finally {
       setSaving(false);
     }
-  }, [draft, cred, providerId, secretFields, onChanged]);
+  }, [draft, cred, providerId, secretFields, onChanged, usesKeyPool]);
 
   const editPrefix = `cred-edit-${cred.id}`;
+  const poolCount = cred.api_keys_count ?? 0;
 
   return (
     <div
@@ -191,17 +204,28 @@ const CredentialRow = memo(function CredentialRow({
                 {t("active_label")}
               </span>
             )}
+            {isAgnes && poolCount > 1 && (
+              <span className="font-mono text-[10px] text-text-4">
+                {t("agnes_video_key_pool_count", { count: poolCount })}
+              </span>
+            )}
           </div>
           <div className="mt-0.5 flex flex-wrap items-center gap-2">
-            {secretFields.map((field) => {
-              const masked = maskedForKey(cred, field.key);
-              if (!masked) return null;
-              return (
-                <span key={field.key} className="font-mono text-[11px] text-text-4">
-                  {secretFields.length > 1 ? `${labelFor(field)}: ${masked}` : masked}
-                </span>
-              );
-            })}
+            {isAgnes && poolCount > 0 && cred.api_keys_masked?.length
+              ? cred.api_keys_masked.map((masked) => (
+                  <span key={masked} className="font-mono text-[11px] text-text-4">
+                    {masked}
+                  </span>
+                ))
+              : secretFields.map((field) => {
+                    const masked = maskedForKey(cred, field.key);
+                    if (!masked) return null;
+                    return (
+                      <span key={field.key} className="font-mono text-[11px] text-text-4">
+                        {secretFields.length > 1 ? `${labelFor(field)}: ${masked}` : masked}
+                      </span>
+                    );
+                  })}
             {cred.credentials_filename && (
               <span className="text-[11px] text-text-4">{cred.credentials_filename}</span>
             )}
@@ -230,7 +254,7 @@ const CredentialRow = memo(function CredentialRow({
               type="button"
               onClick={() => {
                 setEditing(!editing);
-                setDraft({ name: cred.name, base_url: cred.base_url ?? "", secrets: {} });
+                setDraft({ name: cred.name, base_url: cred.base_url ?? "", secrets: {}, apiKeysText: "" });
                 setTestResult(null);
               }}
               aria-label={t("edit_credential", { name: cred.name })}
@@ -325,23 +349,43 @@ const CredentialRow = memo(function CredentialRow({
               className={INPUT_CLS}
             />
           </div>
-          {secretFields.map((field) => (
-            <div key={field.key}>
-              <FieldLabel htmlFor={`${editPrefix}-${field.key}`}>{labelFor(field)}</FieldLabel>
-              <input
-                id={`${editPrefix}-${field.key}`}
-                name={field.key}
-                type="password"
-                autoComplete="off"
-                value={draft.secrets[field.key] ?? ""}
-                onChange={(e) =>
-                  setDraft((d) => ({ ...d, secrets: { ...d.secrets, [field.key]: e.target.value } }))
-                }
-                placeholder={t("keep_existing_placeholder")}
+          {usesKeyPool ? (
+            <div>
+              <FieldLabel htmlFor={`${editPrefix}-api-keys`}>
+                {t("agnes_video_key_pool_label")}
+              </FieldLabel>
+              <textarea
+                id={`${editPrefix}-api-keys`}
+                name="api_keys_text"
+                rows={4}
+                value={draft.apiKeysText}
+                onChange={(e) => setDraft((d) => ({ ...d, apiKeysText: e.target.value }))}
+                placeholder={t("agnes_video_key_pool_edit_placeholder")}
                 className={INPUT_CLS}
               />
+              <p className="mt-1 text-[11px] text-text-4">
+                {t("agnes_video_key_pool_hint")}
+              </p>
             </div>
-          ))}
+          ) : (
+            secretFields.map((field) => (
+              <div key={field.key}>
+                <FieldLabel htmlFor={`${editPrefix}-${field.key}`}>{labelFor(field)}</FieldLabel>
+                <input
+                  id={`${editPrefix}-${field.key}`}
+                  name={field.key}
+                  type="password"
+                  autoComplete="off"
+                  value={draft.secrets[field.key] ?? ""}
+                  onChange={(e) =>
+                    setDraft((d) => ({ ...d, secrets: { ...d.secrets, [field.key]: e.target.value } }))
+                  }
+                  placeholder={t("keep_existing_placeholder")}
+                  className={INPUT_CLS}
+                />
+              </div>
+            ))
+          )}
           {supportsBaseUrl && (
             <div>
               <FieldLabel htmlFor={`${editPrefix}-baseurl`}>{t("base_url_optional")}</FieldLabel>
@@ -407,8 +451,11 @@ function AddCredentialForm({
   onCancel,
 }: AddFormProps) {
   const { t } = useTranslation("dashboard");
+  const isAgnes = providerId === "agnes";
+  const usesKeyPool = isAgnes;
   const [name, setName] = useState("");
   const [secrets, setSecrets] = useState<Record<string, string>>({});
+  const [apiKeysText, setApiKeysText] = useState("");
   const [baseUrl, setBaseUrl] = useState("");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -439,6 +486,17 @@ function AddCredentialForm({
           return;
         }
         await API.uploadVertexCredential(name, file);
+      } else if (usesKeyPool) {
+        if (!apiKeysText.trim()) {
+          setError(t("enter_credentials_required"));
+          setSaving(false);
+          return;
+        }
+        await API.createCredential(providerId, {
+          name: name.trim(),
+          base_url: baseUrl || undefined,
+          api_keys_text: apiKeysText,
+        });
       } else {
         // 至少一组（组内字段全填）即视为凭证完整；单组场景等价于旧版「全部必填」。
         const groupSatisfied = (group: string[]) => group.every((k) => (secrets[k] ?? "").trim());
@@ -511,22 +569,42 @@ function AddCredentialForm({
       ) : (
         <>
           {orHint && <p className="text-[11px] text-text-4">{orHint}</p>}
-          {secretFields.map((field) => (
-            <div key={field.key}>
-              <FieldLabel htmlFor={`cred-add-${field.key}`} required={fieldsUnconditionallyRequired}>
-                {labelFor(field)}
+          {usesKeyPool ? (
+            <div>
+              <FieldLabel htmlFor="cred-add-api-keys" required>
+                {t("agnes_video_key_pool_label")}
               </FieldLabel>
-              <input
-                id={`cred-add-${field.key}`}
-                name={field.key}
-                type="password"
-                autoComplete="off"
-                value={secrets[field.key] ?? ""}
-                onChange={(e) => setSecrets((s) => ({ ...s, [field.key]: e.target.value }))}
+              <textarea
+                id="cred-add-api-keys"
+                name="api_keys_text"
+                rows={4}
+                value={apiKeysText}
+                onChange={(e) => setApiKeysText(e.target.value)}
+                placeholder={t("api_keys_multiline_placeholder")}
                 className={INPUT_CLS}
               />
+              <p className="mt-1 text-[11px] text-text-4">
+                {t("agnes_video_key_pool_hint")}
+              </p>
             </div>
-          ))}
+          ) : (
+            secretFields.map((field) => (
+              <div key={field.key}>
+                <FieldLabel htmlFor={`cred-add-${field.key}`} required={fieldsUnconditionallyRequired}>
+                  {labelFor(field)}
+                </FieldLabel>
+                <input
+                  id={`cred-add-${field.key}`}
+                  name={field.key}
+                  type="password"
+                  autoComplete="off"
+                  value={secrets[field.key] ?? ""}
+                  onChange={(e) => setSecrets((s) => ({ ...s, [field.key]: e.target.value }))}
+                  className={INPUT_CLS}
+                />
+              </div>
+            ))
+          )}
           {supportsBaseUrl && (
             <div>
               <FieldLabel htmlFor="cred-add-baseurl">{t("base_url_optional")}</FieldLabel>

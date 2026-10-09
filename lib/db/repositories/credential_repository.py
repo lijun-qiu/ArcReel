@@ -21,6 +21,7 @@ class CredentialRepository(BaseRepository):
         base_url: str | None = None,
         access_key: str | None = None,
         secret_key: str | None = None,
+        api_keys: str | None = None,
     ) -> ProviderCredential:
         """创建凭证。若为该供应商的第一条，自动设为活跃。"""
         is_first = not await self.has_active_credential(provider)
@@ -28,6 +29,7 @@ class CredentialRepository(BaseRepository):
             provider=provider,
             name=name,
             api_key=api_key,
+            api_keys=api_keys,
             credentials_path=credentials_path,
             base_url=normalize_base_url(base_url),
             access_key=access_key,
@@ -90,6 +92,7 @@ class CredentialRepository(BaseRepository):
         base_url: str | None | object = _UNSET,
         access_key: str | None | object = _UNSET,
         secret_key: str | None | object = _UNSET,
+        api_keys: str | None | object = _UNSET,
     ) -> None:
         """更新凭证字段。省略参数（保持 _UNSET）表示不修改；api_key/base_url/access_key/
         secret_key 显式传 None 会清空该字段——凭证切组时用于清空另一组的旧值（见
@@ -103,6 +106,8 @@ class CredentialRepository(BaseRepository):
             cred.name = name
         if api_key is not _UNSET:
             cred.api_key = api_key  # type: ignore[assignment]
+        if api_keys is not _UNSET:
+            cred.api_keys = api_keys  # type: ignore[assignment]
         if credentials_path is not None:
             cred.credentials_path = credentials_path
         if base_url is not _UNSET:

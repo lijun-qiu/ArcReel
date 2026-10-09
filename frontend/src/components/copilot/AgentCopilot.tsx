@@ -27,6 +27,39 @@ import { formatShortDateTime } from "@/utils/date-format";
 
 const MAX_TEXTAREA_HEIGHT_VH = 50;
 
+/** 输入框上方可点选的加成文案：写入完整约束句，短标签仅作按钮文案。 */
+const COMPOSER_BOOST_IDS = ["sync_subagent", "prefer_acting"] as const;
+type ComposerBoostId = (typeof COMPOSER_BOOST_IDS)[number];
+
+function boostLabelKey(id: ComposerBoostId): string {
+  return `composer_boost_${id}_label`;
+}
+
+function boostTextKey(id: ComposerBoostId): string {
+  return `composer_boost_${id}_text`;
+}
+
+function toggleBoostText(current: string, boost: string): string {
+  const trimmedBoost = boost.trim();
+  if (!trimmedBoost) return current;
+  const parts = current
+    .split(/\n+/)
+    .map((part) => part.trim())
+    .filter(Boolean);
+  if (parts.includes(trimmedBoost)) {
+    return parts.filter((part) => part !== trimmedBoost).join("\n");
+  }
+  return [...parts, trimmedBoost].join("\n");
+}
+
+function resizeTextarea(el: HTMLTextAreaElement | null) {
+  if (!el) return;
+  el.style.height = "auto";
+  const maxH = window.innerHeight * (MAX_TEXTAREA_HEIGHT_VH / 100);
+  el.style.height = `${Math.min(el.scrollHeight, maxH)}px`;
+  el.style.overflowY = el.scrollHeight > maxH ? "auto" : "hidden";
+}
+
 // ---------------------------------------------------------------------------
 // SessionSelector — 会话下拉选择器
 // ---------------------------------------------------------------------------
@@ -324,13 +357,17 @@ export function AgentCopilot() {
       slashPosRef.current = -1;
     }
 
-    // Auto-resize: grow upward until 50vh, then scroll
-    const el = e.target;
-    el.style.height = "auto";
-    const maxH = window.innerHeight * (MAX_TEXTAREA_HEIGHT_VH / 100);
-    el.style.height = `${Math.min(el.scrollHeight, maxH)}px`;
-    el.style.overflowY = el.scrollHeight > maxH ? "auto" : "hidden";
+    resizeTextarea(e.target);
   }, []);
+
+  const handleBoostToggle = (boostText: string) => {
+    if (inputDisabled) return;
+    setLocalInput((prev) => toggleBoostText(prev, boostText));
+    queueMicrotask(() => {
+      resizeTextarea(textareaRef.current);
+      textareaRef.current?.focus();
+    });
+  };
 
   // Derive slash filter from input (text after "/" up to cursor)
   // eslint-disable-next-line react-hooks/refs -- slashPosRef 同时被 render 和 handleSlashSelect 使用，转 state 会引入 stale-closure 问题；此处仅用于过滤展示，不影响 UI 一致性
@@ -552,6 +589,38 @@ export function AgentCopilot() {
         className="p-3"
         style={{ borderTop: "1px solid var(--color-hairline-soft)" }}
       >
+        <div
+          className="mb-2 flex flex-wrap gap-1.5"
+          role="group"
+          aria-label={t("composer_boost_group")}
+        >
+          {COMPOSER_BOOST_IDS.map((id) => {
+            const text = t(boostTextKey(id));
+            const active = localInput
+              .split(/\n+/)
+              .map((part) => part.trim())
+              .includes(text.trim());
+            return (
+              <button
+                key={id}
+                type="button"
+                disabled={inputDisabled}
+                aria-pressed={active}
+                title={text}
+                onClick={() => handleBoostToggle(text)}
+                className="rounded-md px-2 py-1 text-[11px] transition-colors focus-ring disabled:cursor-not-allowed disabled:opacity-40"
+                style={{
+                  color: active ? "var(--color-accent)" : "var(--color-text-3)",
+                  background: active ? "var(--color-accent-dim)" : "transparent",
+                  border: `1px solid ${active ? "var(--color-accent)" : "var(--color-hairline)"}`,
+                }}
+              >
+                {t(boostLabelKey(id))}
+              </button>
+            );
+          })}
+        </div>
+
         {/* Thumbnail strip */}
         {attachedImages.length > 0 && (
           <div className="mb-2 flex flex-wrap gap-2">

@@ -68,11 +68,13 @@ description: 将小说转换为短视频的端到端工作流编排器。当用�
 **每个子任务返回后**，主 agent 执行：
 
 1. **展示摘要**：将子任务返回的摘要展示给用户
-2. **获取确认**：使用 AskUserQuestion 提供选项：
+2. **获取确认**（默认）：使用 AskUserQuestion 提供选项：
    - **继续下一动作**（推荐）
    - **重做此动作**（附加修改要求后重新 dispatch）
    - **跳过此动作**
 3. **根据用户选择行动**
+
+**自动推进**：若项目 `auto_confirm_step1=true`，或用户本轮已授权全自主（如「直接跑完不用逐步确认」）→ **不**调 AskUserQuestion；展示一行摘要后直接按计划下一动作继续。失败、quarantine、造型/资产 `NEED_CONFIRM` 仍停下等用户。
 
 ---
 
@@ -96,6 +98,29 @@ expected source revision：{next_action.args.expected_source_revision}
 
 ---
 
+## `propose_character_looks`：本集资产完备审查（reference_video）
+
+**触发**：`next_action.type == "propose_character_looks"`
+
+参考生视频在拆本集 unit **之前**必须先**仔细**审查本集完备性：跨镜造型 + 本集会引用且库中尚无的场景/道具。写入 `project.json` 共用资产表，后续缺图走 `generate_asset_sheets`，与全局资产路径相同。瞬时妆伤不进造型表；路过一笔的地点/物件不登记；**拿不准时必须问用户确认，禁止空提交蒙混或擅自登记**。分镜路线不会收到此动作。
+
+**dispatch `propose-character-looks` 子任务**：
+
+```text
+项目名称：{project_name}
+集数：{next_action.args.episode}
+本集源文：{next_action.args.source}
+expected_episode_source_revision：{next_action.args.expected_episode_source_revision}
+
+请仔细对照本集原文审查造型 / 场景 / 道具。确定的可 complete_episode_wardrobe（looks + scenes + props）；拿不准的返回 NEED_CONFIRM，由我向用户确认后再带 confirmed_looks / confirmed_scenes / confirmed_props 重派或代为提交。新增后缺图则 generate_assets（与共用 generate_asset_sheets 等价）。
+```
+
+子任务返回后：
+- **`NEED_CONFIRM`**：把待确认表展示给用户，等用户勾选后再带确认清单重派本任务（或主 agent 代调 `complete_episode_wardrobe`），**不要**在未确认时进入 `prepare_step1`
+- **`DONE`**：刷新计划；若下一动作是 `generate_asset_sheets`，按该动作补资产图（`names` 可能为 `角色__造型` 或场景/道具名），完成后再进 `prepare_step1`
+
+---
+
 ## `plan_episodes` / `reset_episode_planning`：分集规划
 
 **恢复触发**：`next_action.type` 为 `"reset_episode_planning"` 时，先按 `next_action.args` 调
@@ -108,11 +133,12 @@ expected source revision：{next_action.args.expected_source_revision}
 
 1. 规划前快速核对 `project.json`：
    - `source_language` 是否与源文实际语言一致。优先级：**用户显式配置 > 自动推断**（正常路径由 overview 生成自动落盘）；发现不一致时**提醒用户（WARN）、说明后果并建议修正**（错误配置会使规划的体量度量与语言前提失真），用户未修正时按显式配置继续，不阻塞流程。字段缺失或经用户确认有误时，走 `mcp__arcreel__patch_project({"settings": {"source_language": "en"|"vi"|"zh"}})` 写入
-   - `episode_target_units`（每集目标体量，按 `source_language` 解读为阅读单位）：已设置则直接沿用；缺失且用户在对话中明确给过字数 → 经 `mcp__arcreel__patch_project({"settings": {"episode_target_units": N}})` 写入；都没有也可直接规划（工具会按短视频节奏自行把握体量），无需强制询问
-2. 调用 `mcp__arcreel__plan_episodes({})`。窗口字数与每批集数上限为工具内部默认，项目设置 `planning_window_chars` / `planning_max_episodes` 可覆盖（经 patch_project settings 写入）。**用户在规划前给出常驻分集偏好时**（如"严格按章节切分，一章一集""每集在某处收尾"），把偏好原文经 `instructions` 传入：`mcp__arcreel__plan_episodes({"instructions": "用户意见原文"})`；意见原样注入规划 prompt 的「用户意见」分节，遵循强度由正文表达——用户明确要求硬性遵循时，把强度措辞一并写进正文（如「必须全部落实：一章一集」）。长篇会分多批规划（每批一次工具调用），该偏好**不持久化**，须在规划完成前**每一批调用都重复带上同一 `instructions`**
+   - `episode_target_units`（每集目标体量）：**禁止 AskUserQuestion 弹「是否设定目标体量」**。已设置则沿用；用户本轮明确给过字数 → `patch_project` 写入；否则直接规划（工具自定节奏）。`planning_split_mode=markers` 时体量目标几乎不影响切点，一律不设、不问
+   - **切分路线**：先读 `project.json` 的 `planning_split_mode`（工作台顶栏「切分」会写入）。**已是 `llm` 或 `markers` → 直接沿用，禁止再 AskUserQuestion**（顶栏已选「按标题标记」就按标记切，不要再弹「切分路线」或体量题）。仅当字段缺失 / `null`，且用户本轮未选定、未开 `auto_confirm_step1`、未授权全自主时，才问一次切分路线——**智能切**（`llm`）还是**按标题标记切**（`markers`）；选定后先 `patch_project` 再规划。问切分时**不要**再附带体量题
+2. 调用 `mcp__arcreel__plan_episodes({})`。若项目 `planning_split_mode=markers`，工具按源文「第N集/章/回/节/卷」或「场景N」标题行规则一次切完当前文件剩余内容，**不调用文本模型**（`instructions` 忽略）；首个标记标题前的正文（如「开篇钩子」）会**并入第1集**，不会因无归属前缀拒切。否则读窗口并调用文本模型。窗口字数与每批集数上限为工具内部默认，项目设置 `planning_window_chars` / `planning_max_episodes` 可覆盖（经 patch_project settings 写入）。**用户在规划前给出常驻分集偏好时**（如"严格按章节切分，一章一集""每集在某处收尾"），把偏好原文经 `instructions` 传入：`mcp__arcreel__plan_episodes({"instructions": "用户意见原文"})`；意见原样注入规划 prompt 的「用户意见」分节，遵循强度由正文表达——用户明确要求硬性遵循时，把强度措辞一并写进正文（如「必须全部落实：一章一集」）。长篇会分多批规划（每批一次工具调用），该偏好**不持久化**，须在规划完成前**每一批调用都重复带上同一 `instructions`**
 3. **批级审阅**：把工具返回的账本摘要（每集标题+钩子+体量）展示给用户，征求意见
 4. 用户提出意见（一句话可同时包含任意多处意见，含全局偏好）→ 走「重置 + 重新规划」：先调用 `mcp__arcreel__reset_episode_planning({"from_episode": N})`，`from_episode` 取意见中最早受影响的集，保留其前的集不受影响
-5. **已消费集警告确认**：重置会波及已消费集（已有 step1/剧本/媒体产物）时，工具会返回受影响集清单而不执行——把影响范围告知用户、获得明确确认后，追加 `"confirm_consumed": true` 重新调用；确认执行后这些集的账本条目被清除，产物本身不删除
+5. **已消费集警告确认**：重置会波及已消费集（已有 step1/剧本/媒体产物）时，工具会返回受影响集清单而不执行——把影响范围告知用户、获得明确确认后，追加 `"confirm_consumed": true` 重新调用；确认执行后这些集的账本条目被清除，重置范围内的剧本 JSON 删除，step1 草稿与媒体产物保留
 6. 重置完成后，全局性意见（如每集体量）先经 `mcp__arcreel__patch_project({"settings": {"episode_target_units": N}})` 显式写入，再带调整后的 `instructions` 重新调用 `mcp__arcreel__plan_episodes` 从 `from_episode` 起分批规划、结果再次展示审阅；若新提交的集号与原消费范围重叠，工具会自动标 stale（产物不删除，需重做下游产物），无需额外确认。**规划完毕后返回会附全局核对材料**（累计集数、体量最小几集、体量中位数、目标体量）：若用户给过总集数、按章节对齐等结构性偏好，须对照核对，有偏差须向用户明确说明（可引导用户重新走「重置 + 重新规划」修正）
 7. 用户对本批规划满意后刷新计划继续。**用户显式授权全自主时**（如"直接跑完整个流程不用逐步确认"），可跳过批级审阅直接继续
 
@@ -127,7 +153,7 @@ dispatch `next_action.args.preprocessor` 指名的子任务，产出 `drafts/epi
 `preprocessor`，profile 侧再推一遍只会造出第二个真相源。各 step1 文件与 schema 的对应关系见
 `.claude/references/generation-modes.md`。
 
-dispatch prompt 通用参数：项目名称、项目路径、集数、本集小说文件路径；可选附加说明（用户对本次生成的意见等任何需带给子任务的临时上下文，原文透传）。
+dispatch prompt 通用参数：项目名称、项目路径、集数、本集小说文件路径；可选附加说明（用户对本次生成的意见等任何需带给子任务的临时上下文，原文透传）。reference_video 拆分时，工具只会把源文「角色：台词」里**明确可立绘的说话人短名**写入角色表（舞台提示 / 声源描述 / 物件名不登记）；附加说明不要要求省略这些对白或改成口型。
 
 若 `next_action.args` 含 `expected_stale_step1_revision`，子任务成功产出正式 step1 后必须调用
 `mcp__arcreel__complete_step1_rebuild({"episode": N, "expected_stale_step1_revision": next_action.args.expected_stale_step1_revision})`。
@@ -152,6 +178,8 @@ dispatch prompt 通用参数：项目名称、项目路径、集数、本集小�
 
 **step1→step2 审核 gate（阻塞）**：`prepare_step1` 的结构化 step1 中间态须经**显式确认**才放行剧本生成（三种结构化 step1 变体——drama / narration / reference_video——一律适用；`reference_video` 的 `step1_reference_units.json` 同样须确认，不要跳过。ad 无 step1，不纳入 gate）。两条等价确认路径——用户在 Web 端审阅 / 编辑后确认，或在对话中明确同意进入视觉生成后由你调用 `mcp__arcreel__confirm_script_review({"episode": N})`（全自主模式下按用户总体授权确认）。未确认（或确认后 step1 又被改）时 `generate_episode_script` 会被 gate 拒绝；**存量项目**（升级前已生成过本集剧本）已 grandfather 放行、无需再确认。
 
+**`auto_confirm_step1=true`**：服务端已对正式 step1（无 quarantine）虚拟放行，计划不会停在 `confirm_step1`；无需再调 `confirm_script_review`。关闭开关后无指纹的集回到待审。可用 `mcp__arcreel__patch_project({"settings": {"auto_confirm_step1": true|false|null}})` 写入 / 清除。
+
 **dispatch `create-episode-script` 子任务**：传入项目名称、项目路径、集数；可选附加说明（用户对本次生成的意见等任何需带给子任务的临时上下文，原文透传）。
 
 ---
@@ -161,7 +189,7 @@ dispatch prompt 通用参数：项目名称、项目路径、集数、本集小�
 **触发**：`next_action.type == "generate_asset_sheets"`。空资产 bucket 是 `analyze_assets` 的合法完成结果，
 不得据此回退；对每个资产类型，取 `artifacts.asset_sheets[type].missing_ids` 与 `requested_ids` 的交集作为
 该类型的 `names`，同时传给子任务和工具：
-- character 缺 character_sheet
+- character 缺 character_sheet（含非 base 造型，ID 为 `角色__造型`）
 - scene 缺 scene_sheet
 - prop 缺 prop_sheet
 

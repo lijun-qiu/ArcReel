@@ -320,3 +320,100 @@ describe("pages/CredentialList credential groups (api_key OR access_key+secret_k
     expect(screen.getAllByText("*")).toHaveLength(1);
   });
 });
+
+describe("pages/CredentialList Agnes key pool", () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("submits api_keys_text when creating Agnes credentials", async () => {
+    vi.spyOn(API, "listCredentials").mockResolvedValue({ credentials: [] });
+    const createSpy = vi.spyOn(API, "createCredential").mockResolvedValue({} as never);
+    render(<CredentialList providerId="agnes" supportsBaseUrl={false} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: /添加供应商/ }));
+    fireEvent.change(await screen.findByLabelText(/名称/), { target: { value: "Agnes 池" } });
+    fireEvent.change(await screen.findByLabelText(/API Key 池/), {
+      target: { value: "k1\nk2" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /添加$/ }));
+
+    await vi.waitFor(() => {
+      expect(createSpy).toHaveBeenCalledWith(
+        "agnes",
+        expect.objectContaining({
+          name: "Agnes 池",
+          api_keys_text: "k1\nk2",
+        }),
+      );
+    });
+  });
+
+  it("shows pool lane count for Agnes credentials with multiple keys", async () => {
+    vi.spyOn(API, "listCredentials").mockResolvedValue({
+      credentials: [
+        mockCred({
+          provider: "agnes",
+          name: "池账号",
+          api_keys_count: 3,
+          api_keys_masked: ["k…1", "k…2", "k…3"],
+        }),
+      ],
+    });
+    render(<CredentialList providerId="agnes" supportsBaseUrl={false} />);
+
+    expect(await screen.findByText(/3 路并发/)).toBeInTheDocument();
+  });
+});
+
+describe("pages/CredentialList ModelScope proxy credential", () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("submits single api_key when creating ModelScope credentials", async () => {
+    vi.spyOn(API, "listCredentials").mockResolvedValue({ credentials: [] });
+    const createSpy = vi.spyOn(API, "createCredential").mockResolvedValue({} as never);
+    render(<CredentialList providerId="modelscope" supportsBaseUrl />);
+
+    fireEvent.click(await screen.findByRole("button", { name: /添加供应商/ }));
+    fireEvent.change(await screen.findByLabelText(/名称/), { target: { value: "魔搭代理" } });
+    fireEvent.change(await screen.findByLabelText(/^API Key/), {
+      target: { value: "modelscope_proxy_api_key" },
+    });
+    fireEvent.change(await screen.findByLabelText(BASE_URL_LABEL), {
+      target: { value: "http://127.0.0.1:10001" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /添加$/ }));
+
+    await vi.waitFor(() => {
+      expect(createSpy).toHaveBeenCalledWith(
+        "modelscope",
+        expect.objectContaining({
+          name: "魔搭代理",
+          api_key: "modelscope_proxy_api_key",
+          base_url: "http://127.0.0.1:10001",
+        }),
+      );
+    });
+  });
+
+  it("shows masked api_key without key-pool chrome", async () => {
+    vi.spyOn(API, "listCredentials").mockResolvedValue({
+      credentials: [
+        mockCred({
+          provider: "modelscope",
+          name: "魔搭",
+          api_key_masked: "models…_key",
+          base_url: "http://127.0.0.1:10001",
+        }),
+      ],
+    });
+    render(<CredentialList providerId="modelscope" supportsBaseUrl />);
+
+    expect(await screen.findByText("魔搭")).toBeInTheDocument();
+    expect(screen.getByText("models…_key")).toBeInTheDocument();
+    expect(screen.getByText("http://127.0.0.1:10001")).toBeInTheDocument();
+    expect(screen.queryByText(/把 Key/)).not.toBeInTheDocument();
+  });
+});

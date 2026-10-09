@@ -422,6 +422,8 @@ def _local_proxy_base_url(env_key: str, port: int) -> str:
 
 OPENROUTER_LOCAL_PROXY_BASE_URL = _local_proxy_base_url("OPENROUTER_PROXY_BASE_URL", 9999)
 MODELSCOPE_LOCAL_PROXY_BASE_URL = _local_proxy_base_url("MODELSCOPE_PROXY_BASE_URL", 10001)
+# 魔搭官方 OpenAI 兼容入口；凭证里填真实 ms-* 时走此地址。本机注入代理仍可用 base_url 覆盖。
+MODELSCOPE_API_BASE_URL = "https://api-inference.modelscope.cn/v1"
 
 
 # Agnes 视频费率（美元/秒）按官方标准价建模，flat 按秒、与分辨率/音频无关；不纳入促销价。
@@ -1437,16 +1439,25 @@ PROVIDER_REGISTRY: dict[str, ProviderMeta] = {
         secret_keys=["api_key"],
         models={
             # --- text ---
-            # agnes-2.5-flash：OpenAI 兼容 /v1/chat/completions（与 2.0 同契约）；官方主推
-            # agent / tool calling；标准价 $0.03/$0.15（当前促销可能为 0）。
+            # agnes-3.0-flash：新一代文本；Chat Completions + Responses + Messages（Anthropic
+            # 兼容，智能体走此契约）；支持文本 / 图像 URL 输入；刊例
+            # $0.05/$0.15（缓存命中 $0.005；当前促销可能为 0）。
+            # 出处：https://www.agnes-ai.com/zh-Hans/docs/agnes-30-flash
+            "agnes-3.0-flash": ModelInfo(
+                display_name="Agnes 3.0 Flash",
+                media_type="text",
+                capabilities=["text_generation", "structured_output", "vision"],
+                default=True,
+                pricing=_agnes_text_pricing("agnes-3.0-flash", 0.05, 0.15),
+            ),
+            # agnes-2.5-flash：上一代 OpenAI 兼容 /v1/chat/completions；兼容回退。
             "agnes-2.5-flash": ModelInfo(
                 display_name="Agnes 2.5 Flash",
                 media_type="text",
                 capabilities=["text_generation", "structured_output"],
-                default=True,
                 pricing=_agnes_text_pricing("agnes-2.5-flash", 0.03, 0.15),
             ),
-            # agnes-2.0-flash：上一代兼容回退；原生 response_format json_schema，失败再降级
+            # agnes-2.0-flash：更早一代兼容回退；原生 response_format json_schema，失败再降级
             # Instructor（见 AgnesTextBackend）。
             "agnes-2.0-flash": ModelInfo(
                 display_name="Agnes 2.0 Flash",
@@ -1482,18 +1493,20 @@ PROVIDER_REGISTRY: dict[str, ProviderMeta] = {
                 display_name="Agnes Video 2.0",
                 media_type="video",
                 capabilities=[],
+                default=True,
                 supported_durations=list(range(1, 11)),
                 resolutions=["480p", "720p", "1080p"],
                 pricing=_agnes_video_pricing("agnes-video-v2.0", 0.005),
             ),
-            # agnes-video-2.5：mode=text|keyframe|reference；seconds 4–10；size 目前仅 720P；
+            # agnes-video-2.5：mode=text|keyframe|reference；seconds 4–10；
+            # size 官方档 720P / 960P / 2K（无 480P；要 480p 请用 v2.0）。
             # reference 走 images[] + audios[]（上限见 backend caps），计费文案前 5 张参考图免费。
             "agnes-video-2.5": ModelInfo(
                 display_name="Agnes Video 2.5",
                 media_type="video",
                 capabilities=[],
                 supported_durations=list(range(4, 11)),
-                resolutions=["720p"],
+                resolutions=["720p", "960p", "2K"],
                 pricing=_agnes_video_pricing("agnes-video-2.5", 0.025),
             ),
             # agnes-video-2.5-flash：复用 2.5 契约；seconds 4–12；size 仅 720P；
@@ -1502,16 +1515,15 @@ PROVIDER_REGISTRY: dict[str, ProviderMeta] = {
                 display_name="Agnes Video 2.5 Flash",
                 media_type="video",
                 capabilities=[],
-                default=True,
                 supported_durations=list(range(4, 13)),
                 resolutions=["720p"],
                 pricing=_agnes_video_pricing("agnes-video-2.5-flash", 0.025),
             ),
         },
         default_base_url=AGNES_BASE_URL,
-        # Agnes 视频上游对并发敏感，出厂串行（默认 1）避免主动制造 503 Service busy；
+        # Agnes 视频默认 7 路，配合凭证 API Key 池「一 key 一路」批量；
         # 用户可经 video_max_workers 覆盖。其余 lane 未声明，走全局默认。
-        default_concurrency={"video": 1},
+        default_concurrency={"video": 7},
     ),
     "openrouter": ProviderMeta(
         display_name="OpenRouter",
@@ -1523,14 +1535,26 @@ PROVIDER_REGISTRY: dict[str, ProviderMeta] = {
         optional_keys=["base_url"],
         secret_keys=["api_key"],
         models={
-            "deepseek/deepseek-v4-flash": ModelInfo(
-                display_name="DeepSeek V4 Flash（付费）",
+            # OpenRouter 刊例：https://openrouter.ai/deepseek/deepseek-v4-flash-0731 （$0.05 / $0.16 per 1M）
+            "deepseek/deepseek-v4-flash-0731": ModelInfo(
+                display_name="DeepSeek V4 Flash 0731（付费）",
                 media_type="text",
                 capabilities=["text_generation", "structured_output"],
                 default=True,
                 pricing=PerToken(
-                    rates={"deepseek/deepseek-v4-flash": {"input": 0.14, "output": 0.28}},
-                    default_model="deepseek/deepseek-v4-flash",
+                    rates={"deepseek/deepseek-v4-flash-0731": {"input": 0.05, "output": 0.16}},
+                    default_model="deepseek/deepseek-v4-flash-0731",
+                    currency="USD",
+                ),
+            ),
+            # OpenRouter 刊例：https://openrouter.ai/deepseek/deepseek-v4-pro （$0.435 / $0.87 per 1M）
+            "deepseek/deepseek-v4-pro": ModelInfo(
+                display_name="DeepSeek V4 Pro（付费）",
+                media_type="text",
+                capabilities=["text_generation", "structured_output"],
+                pricing=PerToken(
+                    rates={"deepseek/deepseek-v4-pro": {"input": 0.435, "output": 0.87}},
+                    default_model="deepseek/deepseek-v4-pro",
                     currency="USD",
                 ),
             ),
@@ -1558,8 +1582,9 @@ PROVIDER_REGISTRY: dict[str, ProviderMeta] = {
     "modelscope": ProviderMeta(
         display_name="魔搭 ModelScope",
         description=(
-            "魔搭 ModelScope API-Inference 免费文本。默认连接本机注入代理（127.0.0.1:10001）；"
-            "客户端 Key 使用 modelscope_proxy_api_key，真实 ms-* 写在代理侧。"
+            "魔搭 ModelScope API-Inference 免费文本（DeepSeek / 智谱 GLM 等）。"
+            "默认连接本机 key 注入代理（127.0.0.1:10001）；客户端 Key 使用 modelscope_proxy_api_key。"
+            "真实 ms-* Key 配置在 openrouter-proxy-injector 的 .env.modelscope。"
         ),
         required_keys=["api_key"],
         optional_keys=["base_url"],
@@ -1570,14 +1595,26 @@ PROVIDER_REGISTRY: dict[str, ProviderMeta] = {
                 display_name="DeepSeek V4 Flash（魔搭免费）",
                 media_type="text",
                 capabilities=["text_generation", "structured_output"],
-                default=True,
                 pricing=_free_text_pricing("deepseek-ai/DeepSeek-V4-Flash-0731"),
             ),
             "deepseek-ai/DeepSeek-V4-Pro": ModelInfo(
                 display_name="DeepSeek V4 Pro（魔搭）",
                 media_type="text",
                 capabilities=["text_generation", "structured_output"],
+                default=True,
                 pricing=_free_text_pricing("deepseek-ai/DeepSeek-V4-Pro"),
+            ),
+            "ZhipuAI/GLM-4.6": ModelInfo(
+                display_name="智谱 GLM-4.6（魔搭免费）",
+                media_type="text",
+                capabilities=["text_generation", "structured_output"],
+                pricing=_free_text_pricing("ZhipuAI/GLM-4.6"),
+            ),
+            "ZhipuAI/GLM-5.3": ModelInfo(
+                display_name="智谱 GLM-5.3（魔搭免费）",
+                media_type="text",
+                capabilities=["text_generation", "structured_output"],
+                pricing=_free_text_pricing("ZhipuAI/GLM-5.3"),
             ),
         },
         default_base_url=MODELSCOPE_LOCAL_PROXY_BASE_URL,

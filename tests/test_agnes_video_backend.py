@@ -19,6 +19,19 @@ from lib.video_backends.base import (
 pytestmark = pytest.mark.unit
 
 
+@pytest.fixture(autouse=True)
+def _bypass_agnes_submit_throttle(monkeypatch):
+    """本模块不测限速；避免进程内 throttle 在用例间互相卡住。"""
+    monkeypatch.setattr(
+        "lib.agnes_video_key_lease.wait_agnes_submit_turn",
+        AsyncMock(return_value=0.0),
+    )
+    monkeypatch.setattr(
+        "lib.agnes_video_key_lease.mark_agnes_submit_attempt",
+        lambda *_a, **_k: None,
+    )
+
+
 def _make_response(status_code: int, json_body: dict) -> MagicMock:
     resp = MagicMock()
     resp.status_code = status_code
@@ -143,6 +156,24 @@ class TestNumFramesAndSize:
         width, height = _resolve_size("720p", "9:16")
         assert (width, height) == (720, 1280)
         assert width % 8 == 0 and height % 8 == 0
+
+    @pytest.mark.parametrize(
+        ("model", "resolution", "expected"),
+        [
+            ("agnes-video-2.5-flash", "480p", "720P"),
+            ("agnes-video-2.5-flash", "720p", "720P"),
+            ("agnes-video-2.5-flash", None, "720P"),
+            ("agnes-video-2.5", "720p", "720P"),
+            ("agnes-video-2.5", "960p", "960P"),
+            ("agnes-video-2.5", "2K", "2K"),
+            ("agnes-video-2.5", "480p", "720P"),  # 2.5 无 480P，兜底 720P
+            ("agnes-video-2.5", None, "720P"),
+        ],
+    )
+    def test_v25_size_maps_resolution(self, model: str, resolution: str | None, expected: str):
+        from lib.video_backends.agnes import _v25_size
+
+        assert _v25_size(model, resolution) == expected
 
 
 class TestDurationCoercion:
@@ -447,6 +478,40 @@ class TestImageChannels:
         assert all(isinstance(u, str) and u.startswith("data:image/") for u in body["images"])
         assert "extra_body" not in body
         assert "num_frames" not in body
+
+    async def test_v25_size_from_request_resolution(self, tmp_path: Path):
+        """正式 2.5 把项目分辨率映射到 API size（960P / 2K）。"""
+        create_resp = _make_response(200, {"id": "video_sz", "status": "queued"})
+        poll_resp = _make_response(
+            200, {**_completed("video_sz"), "id": "video_sz", "url": "https://cdn.example/v.mp4"}
+        )
+        client = _mock_client(
+            post=AsyncMock(return_value=create_resp),
+            get=AsyncMock(return_value=poll_resp),
+        )
+        fake_download = AsyncMock(side_effect=_fake_download_factory(b"v"))
+
+        with (
+            patch("httpx.AsyncClient", return_value=client),
+            patch("lib.video_backends.agnes._POLL_INTERVAL_SECONDS", 0.0),
+            patch("lib.video_backends.agnes.download_video", fake_download),
+        ):
+            from lib.video_backends.agnes import AgnesVideoBackend
+
+            backend = AgnesVideoBackend(api_key="k", base_url="https://x/v1", model="agnes-video-2.5")
+            await backend.generate(
+                VideoGenerationRequest(
+                    prompt="p",
+                    output_path=tmp_path / "o.mp4",
+                    aspect_ratio="16:9",
+                    duration_seconds=5,
+                    resolution="960p",
+                )
+            )
+
+        body = client.post.call_args.kwargs["json"]
+        assert body["size"] == "960P"
+        assert body["mode"] == "text"
 
     async def test_v25_reference_images_exceeded_raises(self, tmp_path: Path):
         refs = [_write_image(tmp_path / f"r{i}.png", f"r{i}".encode()) for i in range(6)]
@@ -1144,6 +1209,12 @@ class TestFailureAndTimeout:
 
 
 class TestSubmitResilience:
+    def test_create_retry_policy_is_unlimited_every_minute(self):
+        from lib.video_backends.agnes import _CREATE_BACKOFF_SECONDS, _CREATE_MAX_ATTEMPTS
+
+        assert _CREATE_MAX_ATTEMPTS is None  # 可重试错误持续至成功
+        assert _CREATE_BACKOFF_SECONDS == (60,)
+
     async def test_submit_retries_on_503_busy(self, tmp_path: Path):
         """503 Service busy → 经 should_retry_submit 的 status_code 闸门重试。"""
         busy = MagicMock()
@@ -1157,24 +1228,44 @@ class TestSubmitResilience:
             get=AsyncMock(return_value=poll_resp),
         )
         fake_download = AsyncMock(side_effect=_fake_download_factory(b"v"))
+        notes: list[str | None] = []
+
+        async def _capture_note(task_id: str, message: str | None) -> int:
+            notes.append(message)
+            return 1
+
+        fake_queue = MagicMock()
+        fake_queue.update_running_error_message = AsyncMock(side_effect=_capture_note)
 
         with (
             patch("httpx.AsyncClient", return_value=client),
             patch("lib.video_backends.agnes._POLL_INTERVAL_SECONDS", 0.0),
             patch("lib.retry._compute_wait", lambda attempt, backoff: 0.0),
             patch("lib.video_backends.agnes.download_video", fake_download),
+            patch("lib.agnes_video_key_lease.wait_agnes_submit_turn", AsyncMock(return_value=0.0)),
+            patch("lib.agnes_video_key_lease.mark_agnes_submit_attempt"),
+            patch("lib.generation_queue.get_generation_queue", return_value=fake_queue),
+            patch("lib.video_backends.base.persist_provider_job_id", AsyncMock()),
         ):
             from lib.video_backends.agnes import AgnesVideoBackend
 
             backend = AgnesVideoBackend(api_key="k", base_url="https://x/v1")
             result = await backend.generate(
                 VideoGenerationRequest(
-                    prompt="p", output_path=tmp_path / "o.mp4", aspect_ratio="9:16", duration_seconds=5
+                    prompt="p",
+                    output_path=tmp_path / "o.mp4",
+                    aspect_ratio="9:16",
+                    duration_seconds=5,
+                    task_id="arc-task-1",
                 )
             )
 
         assert result.task_id == "t-retry"
         assert client.post.call_count == 3
+        # 两次可重试失败各写一次提示，成功后清掉
+        assert len(notes) >= 3
+        assert notes[-1] is None
+        assert any(n and "排队重试中" in n and "503" in n for n in notes[:-1])
 
     async def test_submit_non_retryable_4xx_fails_fast(self, tmp_path: Path):
         bad = _make_response(400, {"error": "bad request"})

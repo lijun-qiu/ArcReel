@@ -86,6 +86,7 @@ agent session 的当前工作目录（cwd）已绑定到当前项目根，**所�
   │  职责：查服务端计划、按受控动作决策、用户确认、dispatch 子任务
   │
   ├─ dispatch → analyze-assets               全局角色/场景/道具提取
+  ├─ dispatch → propose-character-looks      本集资产完备审查（仅 reference_video，拆 unit 前：造型/场景/道具）
   ├─ dispatch → split-narration-segments     旁白/解说片段拆分
   ├─ dispatch → normalize-drama-script       剧情演绎规范化剧本
   ├─ dispatch → split-reference-video-units  参考生视频 video_unit 拆分
@@ -97,7 +98,7 @@ agent session 的当前工作目录（cwd）已绑定到当前项目根，**所�
 
 | 类型 | 用途 | 示例 |
 |------|------|------|
-| **子任务（聚焦任务）** | 需要大量上下文或推理分析 → 保护主 agent context | analyze-assets、split-narration-segments |
+| **子任务（聚焦任务）** | 需要大量上下文或推理分析 → 保护主 agent context | analyze-assets、propose-character-looks、split-narration-segments |
 | **Skill（在子任务内调用）** | 确定性脚本执行 → API 调用、文件生成 | generate-script、generate-assets |
 | **主 Agent 直接操作** | 仅限轻量操作 | 读项目状态、简单文件操作、用户交互 |
 

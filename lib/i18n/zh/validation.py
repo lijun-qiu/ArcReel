@@ -81,10 +81,10 @@ MESSAGES = {
     "val_duration_invalid": "{prefix}: duration_seconds 值无效 '{value}'，必须为正整数",
     # ---- drama utterances ----
     "val_utterance_must_be_object": "{prefix} 必须是对象",
-    "val_utterance_kind_invalid": "{prefix} kind 必须是 dialogue 或 voiceover",
+    "val_utterance_kind_invalid": "{prefix} kind 必须是 dialogue、inner_monologue 或 voiceover",
     "val_utterance_text_invalid": "{prefix} text 必须是非空字符串",
     "val_utterance_speaker_type": "{prefix} speaker 必须是字符串或 null",
-    "val_utterance_dialogue_speaker": "{prefix} dialogue 必须带非空 speaker",
+    "val_utterance_dialogue_speaker": "{prefix} dialogue / inner_monologue 必须带非空 speaker",
     "val_utterance_voiceover_speaker": "{prefix} voiceover 不得带 speaker",
     "val_scene_speech_overflow": (
         "{prefix}: 估算说话时长 {spoken:.1f} 秒超过场景时长 {duration} 秒逾 {tolerance:.0%}"

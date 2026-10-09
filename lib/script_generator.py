@@ -73,6 +73,7 @@ from lib.reference_video.draft_validation import (
     assert_dialogue_preserved,
     validate_dialogue_load,
     validate_unit_text,
+    validate_visual_density,
     violation_items,
 )
 from lib.reference_video.duration_slots import resolve_duration_slot
@@ -1161,9 +1162,9 @@ class ScriptGenerator:
         避免「step1 放行、step2 必拒」的死角。此处只判、不取派生结果——参考图是执行期从正文
         派生的，落盘物只有正文本身。
 
-        台词口播时长同样在此复判：拆分工具只在产出当时判过一次，审阅 gate 上改短 unit 时长或
-        补写台词都能绕开它，而 step2 逐字保留台词、之后再无口播量校验——不复判就会让念不完的
-        unit 一路落盘。
+        台词口播时长与画面节拍密度同样在此复判：拆分工具只在产出当时判过一次，审阅 gate 上改短
+        unit 时长、补写台词或加塞动作都能绕开它，而 step2 逐字保留台词、之后再无这两项校验——
+        不复判就会让念不完或演不完的 unit 一路落盘。
         """
         source_language = self.project_json.get("source_language")
         speech_rate_override = project_speech_rate_override(self.project_json)
@@ -1181,6 +1182,7 @@ class ScriptGenerator:
                 validate_dialogue_load(
                     label, text, int(unit["duration_seconds"]), source_language, speech_rate_override
                 )
+                validate_visual_density(label, text, int(unit["duration_seconds"]))
             except DraftViolation as exc:
                 enriched = [
                     DraftViolation(
@@ -1306,7 +1308,7 @@ class ScriptGenerator:
         隔离期间用户可能在 gate 上改过 step1，保结构 diff 要对着现值判。
 
         仍有违约时刷新草稿里的报告快照后抛出（``DraftViolation``），草稿留在原地供继续修改；
-        无收敛轮次上限。
+        同一草稿最多晋升 5 次。
         """
         draft = read_quarantine(self.project_path, episode, QUARANTINE_KIND_STEP2)
         if draft is None:
@@ -1344,6 +1346,8 @@ class ScriptGenerator:
                     QUARANTINE_KIND_STEP2,
                     content=draft.content,
                     violations=violation_items(exc),
+                    meta=draft.meta,
+                    count_promote=True,
                 ),
                 code="quarantined",
             ) from exc
@@ -1362,6 +1366,8 @@ class ScriptGenerator:
                             code="schema_invalid",
                         )
                     ],
+                    meta=draft.meta,
+                    count_promote=True,
                 ),
                 code="quarantined",
             ) from exc

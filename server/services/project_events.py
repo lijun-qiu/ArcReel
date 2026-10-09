@@ -633,7 +633,17 @@ class ProjectEventService:
                 continue
             expected_script_file = f"scripts/{script_path.name}"
             existing = current_episodes.get(episode)
-            if existing and existing["title"] == title and existing["script_file"] == expected_script_file:
+            if existing is None:
+                # 账本无此集时不自动建条目：重置后残留剧本若被同步会写出无 source_range
+                # 的 episodes，堵住后续 plan_episodes。有意新建仍走 save_script → sync。
+                logger.info(
+                    "剧本对应集不在账本中，跳过同步 project=%s file=%s episode=%s",
+                    project_name,
+                    script_path.name,
+                    episode,
+                )
+                continue
+            if existing["title"] == title and existing["script_file"] == expected_script_file:
                 continue
 
             try:

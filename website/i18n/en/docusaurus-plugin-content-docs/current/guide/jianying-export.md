@@ -74,7 +74,7 @@ com.lveditor.draft/
 
 ## Exported Content {#export-contents}
 
-Jianying export, the workspace presentation preview, and editable bundle downloads all read the same presentation selection. Video and optional TTS tracks use the selected versions, and track lengths come from the media files' actual durations. Original audio and TTS remain at their original speed and unity gain; ArcReel does not truncate, time-stretch, mix, or re-encode them. Mechanical subtitle timing is allocated from the actual media boundary and text length, and remains adjustable or replaceable in Jianying.
+Jianying export, the workspace presentation preview, and editable bundle downloads all read the same presentation selection. Video and optional TTS tracks use the selected versions, and track lengths come from the media files' actual durations. Original audio and TTS remain at their original speed; ArcReel does not truncate, time-stretch, or re-encode them. Default mix gains are: video original at `1.0` when there is no TTS; when TTS is overlaid, video original is muted (`0.0`) and narration TTS is `0.7` (so provider-baked voiceover does not stack on top of IndexTTS). Mechanical subtitle timing is allocated from the actual media boundary and text length, and remains adjustable or replaceable in Jianying.
 
 A manually uploaded video without generation provenance is exported unchanged and is explicitly marked as having unavailable provenance. ArcReel does not infer its currency or generate TTS or subtitles for it.
 

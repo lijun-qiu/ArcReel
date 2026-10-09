@@ -15,6 +15,11 @@ from lib.config.registry import (
     OPENROUTER_LOCAL_PROXY_BASE_URL,
 )
 from lib.config.repository import SystemSettingRepository
+from lib.config.service import (
+    _DEFAULT_TEXT_BACKEND,
+    _DEFAULT_TEXT_BACKEND_COMPLEX,
+    _DEFAULT_TEXT_BACKEND_SIMPLE,
+)
 from lib.db.repositories.credential_repository import CredentialRepository
 
 logger = logging.getLogger(__name__)
@@ -29,17 +34,22 @@ _MODELSCOPE_PROXY_BASE = MODELSCOPE_LOCAL_PROXY_BASE_URL
 _AGNES_API_KEY = "sk-KUTMgK1nOgrFgLjEvMIq3lkWohXtlJLh1XEgAb8YaRZlCAxo"
 _AGNES_BASE_URL = "https://apihub.agnes-ai.com/v1"
 
-_DEFAULT_TEXT = "agnes/agnes-2.5-flash"
 _DEFAULT_IMAGE = "agnes/agnes-image-2.5-flash"
-_DEFAULT_VIDEO = "agnes/agnes-video-2.5-flash"
+_DEFAULT_VIDEO = "agnes/agnes-video-v2.0"
 
 _SEED_MARKER = "local_provider_defaults_seeded"
 
 
 async def seed_local_provider_defaults(session: AsyncSession) -> None:
-    """首次启动时写入免费文本代理 + Agnes 媒体凭证，并设置全局默认后端。"""
+    """首次启动时写入免费文本代理 + Agnes 媒体凭证，并设置全局默认后端。
+
+    文本档位（简单 Flash / 复杂 Pro）每次启动都补空值，不覆盖用户已配。
+    """
     settings = SystemSettingRepository(session)
+    await _ensure_modelscope_text_tiers(settings)
+
     if await settings.get(_SEED_MARKER):
+        await session.commit()
         return
 
     creds = CredentialRepository(session)
@@ -66,18 +76,27 @@ async def seed_local_provider_defaults(session: AsyncSession) -> None:
         base_url=_AGNES_BASE_URL,
     )
 
-    await _ensure_setting_if_empty(settings, "default_text_backend", _DEFAULT_TEXT)
+    await _ensure_setting_if_empty(settings, "default_text_backend", _DEFAULT_TEXT_BACKEND)
     await _ensure_setting_if_empty(settings, "default_image_backend", _DEFAULT_IMAGE)
     await _ensure_setting_if_empty(settings, "default_video_backend", _DEFAULT_VIDEO)
 
     await settings.set(_SEED_MARKER, "1")
     await session.commit()
     logger.info(
-        "已种子本地默认供应商：文本=%s 图像=%s 视频=%s",
-        _DEFAULT_TEXT,
+        "已种子本地默认供应商：文本简单=%s 复杂=%s 默认=%s 图像=%s 视频=%s",
+        _DEFAULT_TEXT_BACKEND_SIMPLE,
+        _DEFAULT_TEXT_BACKEND_COMPLEX,
+        _DEFAULT_TEXT_BACKEND,
         _DEFAULT_IMAGE,
         _DEFAULT_VIDEO,
     )
+
+
+async def _ensure_modelscope_text_tiers(settings: SystemSettingRepository) -> None:
+    """空档位补魔搭：简单 Flash、复杂 Pro；不覆盖已有配置。"""
+    await _ensure_setting_if_empty(settings, "text_backend_simple", _DEFAULT_TEXT_BACKEND_SIMPLE)
+    await _ensure_setting_if_empty(settings, "text_backend_complex", _DEFAULT_TEXT_BACKEND_COMPLEX)
+    await _ensure_setting_if_empty(settings, "default_text_backend", _DEFAULT_TEXT_BACKEND)
 
 
 async def _ensure_credential(

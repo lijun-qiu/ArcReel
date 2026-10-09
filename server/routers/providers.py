@@ -157,6 +157,19 @@ class ConnectionTestResponse(BaseModel):
     message: str
 
 
+class ModelScopePoolEntryPublic(BaseModel):
+    fingerprint: str
+    suffix: str
+    label: str | None = None
+    active: bool = False
+
+
+class ModelScopeKeyPoolResponse(BaseModel):
+    credential_id: int | None = None
+    active_fingerprint: str | None = None
+    entries: list[ModelScopePoolEntryPublic]
+
+
 class CredentialResponse(BaseModel):
     id: int
     provider: str
@@ -167,6 +180,11 @@ class CredentialResponse(BaseModel):
     # 逐字段独立脱敏（不把两段当一个 secret）；除可灵外恒为 None（见 ADR 0037）。
     access_key_masked: str | None = None
     secret_key_masked: str | None = None
+    # Agnes / 魔搭 key 池：数量 + 脱敏列表；其它供应商为 None。
+    api_keys_count: int | None = None
+    api_keys_masked: list[str] | None = None
+    # 魔搭：池条目（指纹 / 标签），供设置页展示与顶栏切换。
+    modelscope_pool: list[ModelScopePoolEntryPublic] | None = None
     is_active: bool
     created_at: str
 
@@ -191,12 +209,29 @@ _StrippedStr = Annotated[str, AfterValidator(_stripped)]
 _StrippedOptStr = Annotated[str | None, AfterValidator(_stripped)]
 
 
+class ModelScopeKeyInput(BaseModel):
+    key: _StrippedStr
+    label: _StrippedOptStr = None
+
+
+class SelectModelScopeKeyRequest(BaseModel):
+    fingerprint: _StrippedStr
+
+
+class UpdateModelScopePoolEntryRequest(BaseModel):
+    label: _StrippedOptStr = None
+
+
 class CreateCredentialRequest(BaseModel):
     name: _StrippedStr
     api_key: _StrippedOptStr = None
     base_url: _StrippedOptStr = None
     access_key: _StrippedOptStr = None
     secret_key: _StrippedOptStr = None
+    # Agnes：多行 / 逗号分隔的 key 池文本；写入 api_keys JSON，并把 api_key 同步为首钥。
+    api_keys_text: str | None = None
+    # 魔搭：结构化 key 池（key + label）；写入 api_keys，api_key 同步为首钥/指定钥。
+    modelscope_keys: list[ModelScopeKeyInput] | None = None
 
 
 class UpdateCredentialRequest(BaseModel):
@@ -205,6 +240,8 @@ class UpdateCredentialRequest(BaseModel):
     base_url: _StrippedOptStr = None
     access_key: _StrippedOptStr = None
     secret_key: _StrippedOptStr = None
+    api_keys_text: str | None = None
+    modelscope_keys: list[ModelScopeKeyInput] | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -285,6 +322,34 @@ async def _get_credential_or_404(
 
 
 def _cred_to_response(cred: ProviderCredential) -> CredentialResponse:
+    from lib.agent_key_pool import fingerprint
+    from lib.agnes_video_key_lease import parse_agnes_api_key_pool
+    from lib.modelscope_key_pool import parse_modelscope_api_keys
+    from lib.providers import PROVIDER_AGNES, PROVIDER_MODELSCOPE
+
+    api_keys_count: int | None = None
+    api_keys_masked: list[str] | None = None
+    modelscope_pool: list[ModelScopePoolEntryPublic] | None = None
+    if cred.provider == PROVIDER_AGNES:
+        pool = parse_agnes_api_key_pool(api_key=cred.api_key, api_keys_json=cred.api_keys)
+        api_keys_count = len(pool)
+        api_keys_masked = [mask_secret(k) for k in pool] if pool else []
+    elif cred.provider == PROVIDER_MODELSCOPE:
+        ms_pool = parse_modelscope_api_keys(cred.api_keys)
+        if ms_pool:
+            active = (cred.api_key or "").strip()
+            api_keys_count = len(ms_pool)
+            api_keys_masked = [mask_secret(e.key) for e in ms_pool]
+            modelscope_pool = [
+                ModelScopePoolEntryPublic(
+                    fingerprint=fingerprint(e.key),
+                    suffix=e.key[-6:] if len(e.key) > 6 else e.key,
+                    label=e.label,
+                    active=bool(active) and e.key == active,
+                )
+                for e in ms_pool
+            ]
+
     return CredentialResponse(
         id=cred.id,
         provider=cred.provider,
@@ -294,9 +359,64 @@ def _cred_to_response(cred: ProviderCredential) -> CredentialResponse:
         base_url=cred.base_url,
         access_key_masked=mask_secret(cred.access_key) if cred.access_key else None,
         secret_key_masked=mask_secret(cred.secret_key) if cred.secret_key else None,
+        api_keys_count=api_keys_count,
+        api_keys_masked=api_keys_masked,
+        modelscope_pool=modelscope_pool,
         is_active=cred.is_active,
         created_at=dt_to_iso(cred.created_at) or "",
     )
+
+
+def _agnes_pool_fields(api_keys_text: str | None) -> tuple[str | None, str | None]:
+    """``api_keys_text`` → (serialized api_keys JSON, primary api_key). 空文本清空池。"""
+    from lib.agent_key_pool import coerce_keys_from_text, serialize_api_keys
+
+    if api_keys_text is None:
+        return None, None
+    stripped = api_keys_text.strip()
+    if not stripped:
+        return None, None
+    pool = coerce_keys_from_text(stripped)
+    if not pool:
+        return None, None
+    return serialize_api_keys(pool), pool[0].key
+
+
+def _modelscope_pool_fields(
+    modelscope_keys: list[ModelScopeKeyInput] | None,
+) -> tuple[str | None, str | None]:
+    """``modelscope_keys`` → (serialized api_keys JSON, primary api_key)。空列表清空池。"""
+    from lib.modelscope_key_pool import ModelScopePoolEntry, serialize_modelscope_api_keys
+
+    if modelscope_keys is None:
+        return None, None
+    if not modelscope_keys:
+        return None, None
+    entries: list[ModelScopePoolEntry] = []
+    for i, item in enumerate(modelscope_keys):
+        key = (item.key or "").strip()
+        if not key:
+            continue
+        label = (item.label or "").strip() or f"K{i + 1}"
+        entries.append(ModelScopePoolEntry(key=key, label=label))
+    if not entries:
+        return None, None
+    return serialize_modelscope_api_keys(entries), entries[0].key
+
+
+def _modelscope_pool_fields_from_text(api_keys_text: str | None) -> tuple[str | None, str | None]:
+    """魔搭多行粘贴 → (serialized api_keys JSON, primary api_key)。空文本清空池。"""
+    from lib.modelscope_key_pool import coerce_modelscope_keys_from_text, serialize_modelscope_api_keys
+
+    if api_keys_text is None:
+        return None, None
+    stripped = api_keys_text.strip()
+    if not stripped:
+        return None, None
+    pool = coerce_modelscope_keys_from_text(stripped)
+    if not pool:
+        return None, None
+    return serialize_modelscope_api_keys(pool), pool[0].key
 
 
 async def _invalidate_caches(request: Request) -> None:
@@ -527,10 +647,25 @@ async def create_credential(
     # 创建是全新行，无可清空——仅复用横跨多组的歧义校验拒绝矛盾提交（新行不落盘）。
     _resolve_credential_group_switch(provider_id, _submitted_secret_values(provider_id, body), None, _t)
     repo = CredentialRepository(session)
+    api_key = body.api_key
+    api_keys_json = None
+    if body.api_keys_text is not None and provider_id == "agnes":
+        api_keys_json, primary = _agnes_pool_fields(body.api_keys_text)
+        if primary:
+            api_key = primary
+    elif body.modelscope_keys is not None and provider_id == "modelscope":
+        api_keys_json, primary = _modelscope_pool_fields(body.modelscope_keys)
+        if primary:
+            api_key = primary
+    elif body.api_keys_text is not None and provider_id == "modelscope":
+        api_keys_json, primary = _modelscope_pool_fields_from_text(body.api_keys_text)
+        if primary:
+            api_key = primary
     cred = await repo.create(
         provider=provider_id,
         name=body.name,
-        api_key=body.api_key,
+        api_key=api_key,
+        api_keys=api_keys_json,
         base_url=body.base_url,
         access_key=body.access_key,
         secret_key=body.secret_key,
@@ -571,6 +706,31 @@ async def update_credential(
         kwargs["access_key"] = body.access_key
     if "secret_key" in body.model_fields_set:
         kwargs["secret_key"] = body.secret_key
+    if "api_keys_text" in body.model_fields_set and provider_id == "agnes":
+        api_keys_json, primary = _agnes_pool_fields(body.api_keys_text)
+        kwargs["api_keys"] = api_keys_json
+        if primary is not None:
+            kwargs["api_key"] = primary
+        elif body.api_keys_text is not None and not (body.api_keys_text or "").strip():
+            # 显式清空池：保留原 api_key（若未同时 PATCH），仅清 api_keys
+            kwargs["api_keys"] = None
+    if "modelscope_keys" in body.model_fields_set and provider_id == "modelscope":
+        api_keys_json, primary = _modelscope_pool_fields(body.modelscope_keys)
+        kwargs["api_keys"] = api_keys_json
+        if primary is not None:
+            # 若同时显式传了 api_key，以 api_key 为准（须属于池内）。
+            if "api_key" not in kwargs or not kwargs.get("api_key"):
+                kwargs["api_key"] = primary
+        elif body.modelscope_keys is not None and len(body.modelscope_keys) == 0:
+            kwargs["api_keys"] = None
+    if "api_keys_text" in body.model_fields_set and provider_id == "modelscope":
+        api_keys_json, primary = _modelscope_pool_fields_from_text(body.api_keys_text)
+        kwargs["api_keys"] = api_keys_json
+        if primary is not None:
+            if "api_key" not in kwargs or not kwargs.get("api_key"):
+                kwargs["api_key"] = primary
+        elif body.api_keys_text is not None and not (body.api_keys_text or "").strip():
+            kwargs["api_keys"] = None
     # 切入某组：清空其它已声明组的字段，消除"静默沿用旧模式"。切入判定已排除本次提交触及的组，
     # 故不会覆盖用户本次填入的值。
     for key in clear_keys:
@@ -624,6 +784,105 @@ async def activate_credential(
     await repo.activate(cred_id, provider_id)
     await session.commit()
     await _invalidate_caches(request)
+    return Response(status_code=204)
+
+
+@router.get("/modelscope/key-pool", response_model=ModelScopeKeyPoolResponse)
+async def get_modelscope_key_pool(
+    session: AsyncSession = Depends(get_async_session),
+) -> ModelScopeKeyPoolResponse:
+    """活跃魔搭凭证的 key 池（脱敏），供项目顶栏手动切换。"""
+    from lib.agent_key_pool import fingerprint
+    from lib.modelscope_key_pool import parse_modelscope_api_keys
+    from lib.providers import PROVIDER_MODELSCOPE
+
+    repo = CredentialRepository(session)
+    cred = await repo.get_active(PROVIDER_MODELSCOPE)
+    if cred is None:
+        return ModelScopeKeyPoolResponse(credential_id=None, active_fingerprint=None, entries=[])
+    pool = parse_modelscope_api_keys(cred.api_keys)
+    if not pool:
+        return ModelScopeKeyPoolResponse(credential_id=cred.id, active_fingerprint=None, entries=[])
+    active = (cred.api_key or "").strip()
+    active_fp = fingerprint(active) if active else None
+    entries = [
+        ModelScopePoolEntryPublic(
+            fingerprint=fingerprint(e.key),
+            suffix=e.key[-6:] if len(e.key) > 6 else e.key,
+            label=e.label,
+            active=bool(active) and e.key == active,
+        )
+        for e in pool
+    ]
+    return ModelScopeKeyPoolResponse(
+        credential_id=cred.id,
+        active_fingerprint=active_fp,
+        entries=entries,
+    )
+
+
+@router.put("/modelscope/key-pool/active", status_code=204)
+async def select_modelscope_key(
+    body: SelectModelScopeKeyRequest,
+    request: Request,
+    _t: Translator,
+    session: AsyncSession = Depends(get_async_session),
+) -> Response:
+    """手动选用魔搭池中的一把 key（不自动轮换）。"""
+    from lib.modelscope_key_pool import parse_modelscope_api_keys, select_modelscope_key_by_fingerprint
+    from lib.providers import PROVIDER_MODELSCOPE
+
+    repo = CredentialRepository(session)
+    cred = await repo.get_active(PROVIDER_MODELSCOPE)
+    if cred is None:
+        raise HTTPException(status_code=404, detail=_t("credentials_not_found"))
+    pool = parse_modelscope_api_keys(cred.api_keys)
+    entry = select_modelscope_key_by_fingerprint(pool, body.fingerprint)
+    if entry is None:
+        raise HTTPException(status_code=404, detail=_t("modelscope_key_not_in_pool"))
+    await repo.update(cred.id, api_key=entry.key)
+    await session.commit()
+    await _invalidate_caches(request)
+    return Response(status_code=204)
+
+
+@router.patch("/modelscope/key-pool/entries/{fp}", status_code=204)
+async def update_modelscope_pool_entry(
+    fp: str,
+    body: UpdateModelScopePoolEntryRequest,
+    request: Request,
+    _t: Translator,
+    session: AsyncSession = Depends(get_async_session),
+) -> Response:
+    """更新魔搭池条目的 label（不改明文 key）。"""
+    from lib.modelscope_key_pool import (
+        ModelScopePoolEntry,
+        parse_modelscope_api_keys,
+        select_modelscope_key_by_fingerprint,
+        serialize_modelscope_api_keys,
+    )
+    from lib.providers import PROVIDER_MODELSCOPE
+
+    repo = CredentialRepository(session)
+    cred = await repo.get_active(PROVIDER_MODELSCOPE)
+    if cred is None:
+        raise HTTPException(status_code=404, detail=_t("credentials_not_found"))
+    pool = parse_modelscope_api_keys(cred.api_keys)
+    entry = select_modelscope_key_by_fingerprint(pool, fp)
+    if entry is None:
+        raise HTTPException(status_code=404, detail=_t("modelscope_key_not_in_pool"))
+    next_label = entry.label if body.label is None else ((body.label or "").strip() or None)
+    updated = [
+        ModelScopePoolEntry(
+            key=e.key,
+            label=next_label if e.key == entry.key else e.label,
+        )
+        for e in pool
+    ]
+    await repo.update(cred.id, api_keys=serialize_modelscope_api_keys(updated))
+    await session.commit()
+    if cred.is_active:
+        await _invalidate_caches(request)
     return Response(status_code=204)
 
 
@@ -848,6 +1107,40 @@ def _test_dashscope(config: dict[str, str], _t: Callable[..., str]) -> Connectio
     )
 
 
+def _test_modelscope(config: dict[str, str], _t: Callable[..., str]) -> ConnectionTestResponse:
+    """通过 models.list() 验证魔搭当前选用 Key（OpenAI 兼容 /v1）。
+
+    与文本 backend 同源：未配 base_url 时回落官方 ``api-inference.modelscope.cn/v1``；
+    ``api_key`` 为凭证当前选用明文（顶栏切换写入）。
+    """
+    from openai import OpenAI
+
+    from lib.config.registry import MODELSCOPE_API_BASE_URL
+
+    api_key = (config.get("api_key") or "").strip()
+    if not api_key:
+        return ConnectionTestResponse(
+            success=False,
+            available_models=[],
+            message=_t("missing_credentials"),
+        )
+
+    client = OpenAI(
+        api_key=api_key,
+        base_url=(config.get("base_url") or "").strip() or MODELSCOPE_API_BASE_URL,
+    )
+    models = client.models.list()
+    keywords = ("deepseek", "glm", "qwen", "zhipu")
+    available = sorted(m.id for m in models.data if any(k in m.id.lower() for k in keywords))
+    if not available:
+        available = sorted(m.id for m in models.data)[:20]
+    return ConnectionTestResponse(
+        success=True,
+        available_models=available,
+        message=_t("connection_success"),
+    )
+
+
 def _test_minimax(config: dict[str, str], _t: Callable[..., str]) -> ConnectionTestResponse:
     """通过 models.list() 验证 MiniMax API Key（OpenAI 兼容协议）。
 
@@ -943,6 +1236,7 @@ _TEST_DISPATCH: dict[str, Callable[[dict[str, str], Any], ConnectionTestResponse
     "dashscope": _test_dashscope,
     "minimax": _test_minimax,
     "kling": _test_kling,
+    "modelscope": _test_modelscope,
 }
 
 

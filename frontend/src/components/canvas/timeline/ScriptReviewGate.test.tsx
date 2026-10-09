@@ -1,9 +1,10 @@
-import { describe, it, expect, vi, afterEach } from "vitest";
+import { describe, it, expect, vi, afterEach, beforeEach } from "vitest";
 import { render, screen, fireEvent, waitFor, act } from "@testing-library/react";
 import { ScriptReviewGate } from "./ScriptReviewGate";
 import { API } from "@/api";
 import { useAppStore } from "@/stores/app-store";
-import type { ScriptReviewState } from "@/types";
+import { useProjectsStore } from "@/stores/projects-store";
+import type { ProjectData, ScriptReviewState } from "@/types";
 
 function dramaState(overrides: Partial<ScriptReviewState> = {}): ScriptReviewState {
   return {
@@ -66,6 +67,11 @@ function narrationState(overrides: Partial<ScriptReviewState> = {}): ScriptRevie
 }
 
 describe("ScriptReviewGate", () => {
+  beforeEach(() => {
+    useProjectsStore.setState(useProjectsStore.getInitialState(), true);
+    useAppStore.setState(useAppStore.getInitialState(), true);
+  });
+
   afterEach(() => vi.restoreAllMocks());
 
   it("renders drama structured content with utterances and pending status", async () => {
@@ -93,6 +99,32 @@ describe("ScriptReviewGate", () => {
     await waitFor(() => expect(confirm).toHaveBeenCalledWith("p", 1));
     await waitFor(() =>
       expect(screen.getByText("视觉生成已放行。再次编辑将重新进入审核。")).toBeInTheDocument(),
+    );
+  });
+
+  it("shows auto-confirm hint when project auto_confirm_step1 is on", async () => {
+    useProjectsStore.getState().setCurrentProject(
+      "p",
+      {
+        title: "Demo",
+        content_mode: "drama",
+        style: "",
+        episodes: [],
+        characters: {},
+        auto_confirm_step1: true,
+      } as ProjectData,
+      {},
+    );
+    vi.spyOn(API, "getScriptReview").mockResolvedValue(
+      dramaState({ status: "confirmed", confirmed_at: null }),
+    );
+
+    render(<ScriptReviewGate projectName="p" episode={1} contentMode="drama" />);
+
+    await waitFor(() =>
+      expect(
+        screen.getByText("已开启自动确认，视觉生成已放行。关闭顶栏「自动确认」后需重新审片。"),
+      ).toBeInTheDocument(),
     );
   });
 

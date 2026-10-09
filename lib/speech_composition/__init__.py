@@ -360,7 +360,7 @@ def adapt_drama_scene(scene: Mapping[str, object]) -> SpeechUnitSnapshot:
                 problems.append(_parse_problem(normalized_unit_id, SpeechFieldLocation(("utterances", index))))
                 continue
             kind = raw.get("kind")
-            if kind not in {"dialogue", "voiceover"}:
+            if kind not in {"dialogue", "inner_monologue", "voiceover"}:
                 problems.append(_parse_problem(normalized_unit_id, SpeechFieldLocation(("utterances", index, "kind"))))
                 continue
             _append_structured_entry(
@@ -369,7 +369,7 @@ def adapt_drama_scene(scene: Mapping[str, object]) -> SpeechUnitSnapshot:
                 normalized_unit_id,
                 text=raw.get("text"),
                 speaker=raw.get("speaker"),
-                speaker_required=kind == "dialogue",
+                speaker_required=kind in {"dialogue", "inner_monologue"},
                 text_location=SpeechFieldLocation(("utterances", index, "text")),
                 speaker_location=SpeechFieldLocation(("utterances", index, "speaker")),
             )

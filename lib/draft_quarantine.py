@@ -3,8 +3,8 @@
 生成一次要付费，产物违约时丢弃重抽既烧钱又不收敛（同一个模型对同一份原文大概率再犯同一
 类错）。改为：正式文件一步不动，违约产物连同逐条违约报告落到同目录的隔离草稿，agent 用文件
 工具就地修 ``content``（或去补登记资产、改用登记名），再调晋升工具按**同一个校验器**全量重判
-——过则晋升为正式文件、隔离草稿随之清除，不过则报告刷新、继续改。无收敛轮次上限：每一轮都
-由 agent 带着具体定位在改，不是重抽碰运气。
+——过则晋升为正式文件、隔离草稿随之清除，不过则报告刷新、继续改。同一草稿最多晋升 5 次：
+达到上限后报告要求停止调用晋升工具，把剩余违约回报用户，不再指示继续改。
 
 同一个隔离草稿位还承担第二种用途：**编辑工位**。正式 step1 不可用 Write/Edit 直改（它与 Web 端
 保存、迁移读改写、重拆分共享一把 per-path 锁，而 agent 的文件工具取不到这把锁），要改已定稿的
@@ -188,20 +188,67 @@ def clear_quarantine(project_path: Path, episode: int, kind: str) -> None:
     quarantine_path(project_path, episode, kind).unlink(missing_ok=True)
 
 
-def render_report(draft: Path, kind: str, violations: list[DraftViolation], *, episode: int) -> str:
+#: 同一份隔离草稿上，校验未通过后的晋升次数上限。达到后不再指示继续晋升。
+MAX_PROMOTE_ATTEMPTS = 5
+_PROMOTE_ATTEMPTS_KEY = "promote_attempts"
+
+
+def next_promote_meta(meta: dict[str, Any] | None) -> tuple[dict[str, Any], int]:
+    """晋升未通过时把次数加一写回 meta，其余键保持不动。"""
+
+    stored = dict(meta or {})
+    try:
+        current = int(stored.get(_PROMOTE_ATTEMPTS_KEY) or 0)
+    except (TypeError, ValueError):
+        current = 0
+    attempt = current + 1
+    stored[_PROMOTE_ATTEMPTS_KEY] = attempt
+    return stored, attempt
+
+
+def _promote_limit_sentence(attempt: int | None) -> str:
+    if attempt is None:
+        return (
+            f"仍有违约时可继续修改再晋升，同一草稿最多 {MAX_PROMOTE_ATTEMPTS} 次；"
+            "达到上限后停止调用晋升工具，把剩余违约回报用户。"
+        )
+    if attempt >= MAX_PROMOTE_ATTEMPTS:
+        return (
+            f"这是第 {attempt} 次晋升，已达 {MAX_PROMOTE_ATTEMPTS} 次上限。"
+            "停止修改、停止调用晋升工具，把剩余违约回报用户。"
+        )
+    left = MAX_PROMOTE_ATTEMPTS - attempt
+    return (
+        f"这是第 {attempt} 次晋升，还可再晋升 {left} 次（最多 {MAX_PROMOTE_ATTEMPTS} 次）。"
+        "达到上限后停止调用晋升工具，把剩余违约回报用户。"
+    )
+
+
+def render_report(
+    draft: Path,
+    kind: str,
+    violations: list[DraftViolation],
+    *,
+    episode: int,
+    promote_attempts: int | None = None,
+) -> str:
     """渲染回给 agent 的违约报告：逐条定位 + 按处置路径写的修复指引。
 
     指引写「改哪个文件的哪个字段、改完调什么」而非泛泛的「请修正」：处置路径是本机制的全部
     要点，agent 若不知道产物还在盘上，就会退回重抽。
     """
     stage, field = _QUARANTINE_REPORT_HINTS[kind]
-    return (
+    body = (
         f"❌ {stage}产出有 {len(violations)} 处违约，已隔离到草稿（正式文件未被改动）：{draft}\n\n"
         f"{render_violation_report(violations)}\n\n"
-        f"处置：直接编辑该草稿的 content.{field} 修正违约；"
+    )
+    if promote_attempts is not None and promote_attempts >= MAX_PROMOTE_ATTEMPTS:
+        return body + _promote_limit_sentence(promote_attempts)
+    return (
+        body + f"处置：直接编辑该草稿的 content.{field} 修正违约；"
         "若违约是「资产名未登记」，也可改为在 project.json 登记该资产、或改用已登记的名称。\n"
         f'改完调用 {PROMOTE_TOOL_NAME}({{"episode": {episode}}}) 重新全量校验并晋升为正式文件；'
-        "仍有违约时会返回刷新后的报告，可继续修改再晋升，无轮次上限。"
+        f"{_promote_limit_sentence(promote_attempts)}"
     )
 
 
@@ -213,14 +260,21 @@ def quarantine_and_report(
     content: dict[str, Any],
     violations: list[DraftViolation],
     meta: dict[str, Any] | None = None,
+    count_promote: bool = False,
 ) -> str:
     """违约处置的单一出口：落隔离草稿 + 渲染报告，返回回给 agent 的报告文本。
 
     落盘与报告成对出现——报告要指名草稿路径，路径由落盘决定；两步分开写在各调用点，迟早会
     出现「报告说去改某个文件、而那个文件没被写出来」的分叉。
+
+    ``count_promote`` 只在晋升未通过时打开：次数写进 meta，报告按上限措辞。首次隔离不算一次晋升。
     """
-    path = write_quarantine(project_path, episode, kind, content=content, violations=violations, meta=meta)
-    return render_report(path, kind, violations, episode=episode)
+    stored = meta
+    attempt = None
+    if count_promote:
+        stored, attempt = next_promote_meta(meta)
+    path = write_quarantine(project_path, episode, kind, content=content, violations=violations, meta=stored)
+    return render_report(path, kind, violations, episode=episode, promote_attempts=attempt)
 
 
 __all__ = [

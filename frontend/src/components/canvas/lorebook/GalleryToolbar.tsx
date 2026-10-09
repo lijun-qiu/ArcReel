@@ -1,5 +1,5 @@
 import { useTranslation } from "react-i18next";
-import { Plus, Package } from "lucide-react";
+import { Plus, Package, Sparkles, Loader2 } from "lucide-react";
 
 interface Props {
   title: string;
@@ -8,13 +8,28 @@ interface Props {
   onAdd?: () => void;
   /** 未提供时隐藏「从资产库选择」入口（如不入全局库的资产类型）。 */
   onPickFromLibrary?: () => void;
+  /** 未提供时隐藏「一键生成资产图」入口。 */
+  onGenerateAll?: () => void;
+  /** 批量入队进行中：按钮转 loading 并禁用。 */
+  generateAllBusy?: boolean;
+  /** 无可生成项（列表空或全部已有图）时禁用。 */
+  generateAllDisabled?: boolean;
 }
 
 /**
  * GalleryToolbar — v3 视觉：玻璃栏 + display-serif 标题 + accent CTA。
  */
-export function GalleryToolbar({ title, count, onAdd, onPickFromLibrary }: Props) {
+export function GalleryToolbar({
+  title,
+  count,
+  onAdd,
+  onPickFromLibrary,
+  onGenerateAll,
+  generateAllBusy = false,
+  generateAllDisabled = false,
+}: Props) {
   const { t } = useTranslation(["dashboard", "assets"]);
+  const generateDisabled = generateAllBusy || generateAllDisabled;
   return (
     <div
       className="sticky top-0 z-10 flex items-center gap-3 px-5 py-3"
@@ -54,6 +69,36 @@ export function GalleryToolbar({ title, count, onAdd, onPickFromLibrary }: Props
         {String(count).padStart(2, "0")}
       </span>
       <div className="flex-1" />
+      {onGenerateAll && (
+        <button
+          type="button"
+          onClick={onGenerateAll}
+          disabled={generateDisabled}
+          aria-busy={generateAllBusy || undefined}
+          className="focus-ring inline-flex items-center gap-1.5 rounded-md px-2.5 py-1 text-[11.5px] transition-colors disabled:cursor-not-allowed disabled:opacity-50"
+          style={{
+            color: "var(--color-text-2)",
+            border: "1px solid var(--color-hairline)",
+            background: "oklch(0.22 0.011 265 / 0.5)",
+          }}
+          onMouseEnter={(e) => {
+            if (generateDisabled) return;
+            e.currentTarget.style.background = "oklch(0.26 0.013 265 / 0.7)";
+            e.currentTarget.style.color = "var(--color-text)";
+          }}
+          onMouseLeave={(e) => {
+            e.currentTarget.style.background = "oklch(0.22 0.011 265 / 0.5)";
+            e.currentTarget.style.color = "var(--color-text-2)";
+          }}
+        >
+          {generateAllBusy ? (
+            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+          ) : (
+            <Sparkles className="h-3.5 w-3.5" />
+          )}
+          {generateAllBusy ? t("dashboard:submitting") : t("dashboard:generate_all_sheets")}
+        </button>
+      )}
       {onPickFromLibrary && (
       <button
         type="button"

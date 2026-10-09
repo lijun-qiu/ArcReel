@@ -82,18 +82,25 @@ export interface Dialogue {
   line: string;
 }
 
-export type UtteranceKind = "dialogue" | "voiceover";
+export type UtteranceKind = "dialogue" | "voiceover" | "inner_monologue";
 
 /**
  * Drama 场景级有序发声条目，判别式联合（discriminated union）按 kind 收窄，把 kind ⇄ speaker
- * 约束编码进类型：dialogue 必带非空 speaker、voiceover 不得带 speaker。非法组合（dialogue 缺
- * speaker、voiceover 带 speaker）编译期即被拒，与后端 Utterance 契约一致。
+ * 约束编码进类型：dialogue / inner_monologue 必带非空 speaker、voiceover 不得带 speaker。
+ * 非法组合编译期即被拒，与后端 Utterance 契约一致。
  * 取代旧 video_prompt.dialogue + 场景 voiceover 双字段（见 ADR 0040）。
  * 富审阅 / 编辑 UI 后续提供；本阶段仅类型 / 形状守卫。
  */
 export interface DialogueUtterance {
   kind: "dialogue";
-  /** 角色台词必带非空说话人。 */
+  /** 角色开口台词必带非空说话人。 */
+  speaker: string;
+  text: string;
+}
+
+export interface InnerMonologueUtterance {
+  kind: "inner_monologue";
+  /** 内心独白必带非空说话人（挂角色音色、不做说话口型）。 */
   speaker: string;
   text: string;
 }
@@ -105,7 +112,7 @@ export interface VoiceoverUtterance {
   text: string;
 }
 
-export type Utterance = DialogueUtterance | VoiceoverUtterance;
+export type Utterance = DialogueUtterance | InnerMonologueUtterance | VoiceoverUtterance;
 
 /**
  * step1 结构化中间态（审核 gate 的可审 / 可改对象）。映射后端 lib/script_models.py 的
@@ -221,6 +228,10 @@ export interface NarrationSegment {
   transition_to_next: TransitionType;
   note?: string;
   /**
+   * 分镜生成是否注入上一镜分镜图作衔接参考。缺省 false（存量无字段等同关闭）。
+   */
+  use_previous_storyboard?: boolean;
+  /**
    * 尾帧快照路径（项目内相对路径）。视频从分镜图开场、过渡到这张图收尾。
    * 只由 /end-frame 的设置/清除端点写入——通用剧本 PATCH 刻意不接受该字段，
    * 避免绕过快照复制写出悬空引用（见 server/routers/end_frames.py）。
@@ -245,6 +256,10 @@ export interface DramaScene {
   utterances?: Utterance[];
   transition_to_next: TransitionType;
   note?: string;
+  /**
+   * 分镜生成是否注入上一镜分镜图作衔接参考。缺省 false（存量无字段等同关闭）。
+   */
+  use_previous_storyboard?: boolean;
   /**
    * 尾帧快照路径（项目内相对路径）。视频从分镜图开场、过渡到这张图收尾。
    * 只由 /end-frame 的设置/清除端点写入——通用剧本 PATCH 刻意不接受该字段，
@@ -307,6 +322,11 @@ export interface AdShot {
   video_prompt: VideoPrompt | string;
   transition_to_next: TransitionType;
   note?: string;
+  /**
+   * 分镜生成是否注入上一镜分镜图作衔接参考。缺省 false（存量无字段等同关闭）。
+   * ad 镜头无 segment_break；几何规则仍按「非首镜 + 上一镜有分镜图」。
+   */
+  use_previous_storyboard?: boolean;
   /**
    * 尾帧快照路径（项目内相对路径）。视频从分镜图开场、过渡到这张图收尾。
    * 只由 /end-frame 的设置/清除端点写入——通用剧本 PATCH 刻意不接受该字段，

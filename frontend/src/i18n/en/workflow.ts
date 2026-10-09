@@ -123,6 +123,7 @@ export default {
   'action_repair_project_data': 'ask the agent to repair the damaged project file',
   'action_collect_project_input': 'add the story source and project setup',
   'action_analyze_assets': 'analyse the source for characters, scenes and props',
+  'action_propose_character_looks': 'review and register episode looks, scenes, and props',
   'action_reset_episode_planning': 'reset episode planning so new source text is covered',
   'action_plan_episodes': 'plan the episodes',
   'action_draft_selling_points': 'draft the selling points',

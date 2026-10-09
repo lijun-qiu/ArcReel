@@ -36,6 +36,28 @@ describe("tokenizePrompt", () => {
     expect(mention?.text).toBe("@路人");
   });
 
+  it("resolves @[角色@造型] when the look key is in the lookup", () => {
+    const lookup: MentionLookup = { ...LOOKUP, "主角@战损": "character" };
+    const t = tokenizePrompt("@[主角@战损] 抬头", lookup);
+    const mention = t.find((x) => x.kind === "mention");
+    expect(mention).toMatchObject({
+      kind: "mention",
+      name: "主角@战损",
+      assetKind: "character",
+      text: "@[主角@战损]",
+    });
+  });
+
+  it("flags @[角色@造型] as unknown when the look is not registered", () => {
+    const t = tokenizePrompt("@[主角@战损] 抬头", LOOKUP);
+    const mention = t.find((x) => x.kind === "mention");
+    expect(mention).toMatchObject({
+      kind: "mention",
+      name: "主角@战损",
+      assetKind: "unknown",
+    });
+  });
+
   it("resolves registered products like any other asset kind", () => {
     const t = tokenizePrompt("@水杯 特写", { ...LOOKUP, 水杯: "product" });
     const mention = t.find((x) => x.kind === "mention");
@@ -86,10 +108,10 @@ describe("tokenizePrompt", () => {
         text: "@[角色甲（成年）]{我来了}",
         speaker: "角色甲（成年）",
         speakerKind: "character",
+        speechKind: "dialogue",
       },
     ]);
   });
-
   // 正文里没有段落前缀语法：`镜头1：` 与 `Shot 1 (3s):` 都只是普通描述文字。
   it("treats prefix-shaped text as plain description", () => {
     for (const src of ["镜头1：hello world", "Shot 1 (3s): hello world", "  镜头１：内景 @主角"]) {
@@ -142,9 +164,12 @@ describe("tokenizePrompt", () => {
 
 describe("toScriptLines", () => {
   it("emits one line per physical source line", () => {
-    const lines = toScriptLines("@[张三] 推门。\n@[张三]：{我来了}\n{风声}", LOOKUP);
-    expect(lines.map((l) => l.kind)).toEqual(["text", "dialogue", "voiceover"]);
-    expect(lines.map((l) => l.sourceLine)).toEqual([0, 1, 2]);
+    const lines = toScriptLines(
+      "@[张三] 推门。\n@[张三]：{我来了}\n@[张三%内心独白]{心声}\n{风声}",
+      LOOKUP,
+    );
+    expect(lines.map((l) => l.kind)).toEqual(["text", "dialogue", "inner_monologue", "voiceover"]);
+    expect(lines.map((l) => l.sourceLine)).toEqual([0, 1, 2, 3]);
   });
 
   it("emits a dialogue speaker typed in NFD as NFC and resolves it against the lookup", () => {

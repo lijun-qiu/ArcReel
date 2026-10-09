@@ -11,6 +11,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from lib.config.registry import MODELSCOPE_LOCAL_PROXY_BASE_URL
+
 CUSTOM_SENTINEL_ID = "__custom__"
 
 
@@ -115,6 +117,26 @@ PRESET_PROVIDERS: dict[str, PresetProvider] = {
         api_key_pattern=r"^sk-[A-Za-z0-9]+$",
         is_recommended=False,
     ),
+    "modelscope": PresetProvider(
+        id="modelscope",
+        display_name="ModelScope (魔搭)",
+        icon_key="ModelScope",
+        # 本机 key 注入代理（OpenAI 兼容形态）；真实 ms-* 配在代理 .env.modelscope
+        messages_url=MODELSCOPE_LOCAL_PROXY_BASE_URL,
+        discovery_url=MODELSCOPE_LOCAL_PROXY_BASE_URL,
+        default_model="deepseek-ai/DeepSeek-V4-Pro",
+        suggested_models=(
+            "deepseek-ai/DeepSeek-V4-Pro",
+            "deepseek-ai/DeepSeek-V4-Flash-0731",
+            "ZhipuAI/GLM-5.3",
+            "Qwen/Qwen3-Coder-480B-A35B-Instruct",
+        ),
+        docs_url="https://modelscope.cn/docs/model-service/API-Inference/intro",
+        api_key_url="https://modelscope.cn/my/myaccesstoken",
+        notes_i18n_key="preset_notes_modelscope",
+        api_key_pattern=r"^(ms-[A-Za-z0-9_-]+|modelscope_proxy_api_key)$",
+        is_recommended=False,
+    ),
     "agnes": PresetProvider(
         id="agnes",
         display_name="Agnes",
@@ -122,9 +144,9 @@ PRESET_PROVIDERS: dict[str, PresetProvider] = {
         # Anthropic Messages：POST {base}/v1/messages（与官方文档一致）
         messages_url="https://apihub.agnes-ai.com",
         discovery_url="https://apihub.agnes-ai.com",
-        default_model="agnes-2.5-flash",
-        suggested_models=("agnes-2.5-flash", "agnes-2.0-flash"),
-        docs_url="https://agnes-ai.com/zh-Hans/docs/agnes-25-flash",
+        default_model="agnes-3.0-flash",
+        suggested_models=("agnes-3.0-flash", "agnes-2.5-flash", "agnes-2.0-flash"),
+        docs_url="https://www.agnes-ai.com/zh-Hans/docs/agnes-30-flash",
         api_key_url="https://platform.agnes-ai.com/",
         notes_i18n_key="preset_notes_agnes",
         api_key_pattern=r"^sk-[A-Za-z0-9]+$",
@@ -209,6 +231,7 @@ PRESET_ORDER: tuple[str, ...] = (
     "arcreel",
     "agnes",
     "deepseek",
+    "modelscope",
     "kimi",
     "xiaomi-mimo",
     "glm-cn",

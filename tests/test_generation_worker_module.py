@@ -881,22 +881,22 @@ class TestCapacityTable:
                 assert db_table.get(pid, lane) == env_table.get(pid, lane)
 
     @pytest.mark.unit
-    def test_agnes_video_default_one_outranks_active_global_env(self, monkeypatch):
-        """真实注册表：Agnes 视频 lane 出厂钉死 1，即便部署把全局 VIDEO_MAX_WORKERS 调高也不解除。
+    def test_agnes_video_default_seven_outranks_active_global_env(self, monkeypatch):
+        """真实注册表：Agnes 视频 lane 出厂钉死 7，即便部署把全局 VIDEO_MAX_WORKERS 调高也不解除。
 
-        这是本切片要的 503 规避保证——声明默认压过「活跃的」全局 env（而非仅压过缺省值）。
-        顺带验证两条隔离性质：声明只作用于 video lane（image 仍随全局默认）；钉死是 Agnes 专属，
+        声明默认压过「活跃的」全局 env（而非仅压过缺省值）。顺带验证两条隔离性质：
+        声明只作用于 video lane（image 仍随全局默认）；钉死是 Agnes 专属，
         未声明默认的视频供应商（ark）仍跟随全局 env。机制本身（声明默认 > 全局、用户值 > 声明默认、
         跨 from_env/from_db 一致）已由上面的合成 declared-* 测试覆盖，此处只钉真实条目的接线。
         """
         monkeypatch.delenv("IMAGE_MAX_WORKERS", raising=False)
-        monkeypatch.setenv("VIDEO_MAX_WORKERS", "5")
+        monkeypatch.setenv("VIDEO_MAX_WORKERS", "20")
 
         table = CapacityTable.from_env()
 
-        assert table.get("agnes", "video") == 1  # 声明默认压过活跃的全局 5
+        assert table.get("agnes", "video") == 7  # 声明默认压过活跃的全局 20
         assert table.get("agnes", "image") == 5  # 声明不外溢到未声明的 image lane
-        assert table.get("ark", "video") == 5  # 未声明默认的视频供应商仍跟随全局 env
+        assert table.get("ark", "video") == 20  # 未声明默认的视频供应商仍跟随全局 env
 
 
 class TestGenerationWorker:
@@ -1724,6 +1724,204 @@ class TestGenerationWorker:
 
         # Wait for tasks to complete
         await asyncio.gather(*worker._slots.all_active_tasks(), return_exceptions=True)
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_claim_agnes_key_pool_raises_video_concurrency(self, monkeypatch):
+        """手动批量 flag + N keys → 即使 CapacityTable video=1 也可认领 N 路。"""
+
+        class _ClaimableQueue(_FakeQueue):
+            def __init__(self):
+                super().__init__()
+                self._tasks = [
+                    {
+                        "task_id": f"v{i}",
+                        "task_type": "video",
+                        "media_type": "video",
+                        "payload": {"use_agnes_key_pool": True},
+                    }
+                    for i in range(3)
+                ]
+
+            async def claim_next_task(self, media_type, **_kwargs):  # type: ignore[override]
+                if media_type != "video" or not self._tasks:
+                    return None
+                return self._tasks.pop(0)
+
+        queue = _ClaimableQueue()
+        worker = GenerationWorker(queue=queue, capacity=_cap({"agnes": {"image": 0, "video": 1}}))
+
+        async def _extract(_task):
+            return "agnes"
+
+        async def _load_pool(self):
+            self._agnes_key_pool_size = 3
+            return ["k1", "k2", "k3"]
+
+        async def _fake_execute(task, **_kwargs):
+            await asyncio.sleep(0.05)
+            return {"ok": True}
+
+        monkeypatch.setattr("lib.generation_worker._extract_provider", _extract)
+        monkeypatch.setattr(GenerationWorker, "_load_agnes_video_key_pool", _load_pool)
+        monkeypatch.setattr(
+            "server.services.generation_tasks.execute_generation_task",
+            _fake_execute,
+        )
+
+        claimed = await worker._claim_tasks()
+        assert claimed
+        assert worker._slots.occupied("agnes", "video") == 3
+        assert worker._agnes_key_leases.leased_count() == 3
+
+        await asyncio.gather(*worker._slots.all_active_tasks(), return_exceptions=True)
+        await worker._drain_finished_tasks()
+        assert worker._agnes_key_leases.leased_count() == 0
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_claim_agnes_single_key_leases_without_flag(self, monkeypatch):
+        """单 key 无 use_agnes_key_pool 也走租约，CapacityTable 多槽时仍最多 1 路。"""
+
+        class _ClaimableQueue(_FakeQueue):
+            def __init__(self):
+                super().__init__()
+                self._tasks = [
+                    {
+                        "task_id": "v1",
+                        "task_type": "video",
+                        "media_type": "video",
+                        "payload": {},
+                    },
+                    {
+                        "task_id": "v2",
+                        "task_type": "video",
+                        "media_type": "video",
+                        "payload": {},
+                    },
+                ]
+                self.requeued: list[str] = []
+
+            async def claim_next_task(self, media_type, **_kwargs):  # type: ignore[override]
+                if media_type != "video" or not self._tasks:
+                    return None
+                return self._tasks.pop(0)
+
+        queue = _ClaimableQueue()
+        # video=3：若无租约可同时认领 2 路；有租约时第二路因 key 池满回队。
+        worker = GenerationWorker(queue=queue, capacity=_cap({"agnes": {"image": 0, "video": 3}}))
+
+        async def _extract(_task):
+            return "agnes"
+
+        async def _load_pool(self):
+            self._agnes_key_pool_size = 1
+            return ["only"]
+
+        async def _fake_execute(task, **_kwargs):
+            await asyncio.sleep(10)
+            return {"ok": True}
+
+        async def _capture_requeue(self, task_id):
+            queue.requeued.append(task_id)
+            return True
+
+        monkeypatch.setattr("lib.generation_worker._extract_provider", _extract)
+        monkeypatch.setattr(GenerationWorker, "_load_agnes_video_key_pool", _load_pool)
+        monkeypatch.setattr(
+            "server.services.generation_tasks.execute_generation_task",
+            _fake_execute,
+        )
+        monkeypatch.setattr(GenerationWorker, "_requeue_single_task", _capture_requeue)
+
+        claimed = await worker._claim_tasks()
+        assert claimed
+        assert worker._slots.occupied("agnes", "video") == 1
+        assert worker._agnes_key_leases.leased_count() == 1
+        assert "v2" in queue.requeued
+
+        for task in worker._slots.all_active_tasks():
+            task.cancel()
+        await asyncio.gather(*worker._slots.all_active_tasks(), return_exceptions=True)
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_claim_agnes_multi_key_leases_without_flag(self, monkeypatch):
+        """多 key 凭证即使无 use_agnes_key_pool 也按租约轮换，避免默认多槽打在同一 key。"""
+
+        class _ClaimableQueue(_FakeQueue):
+            def __init__(self):
+                super().__init__()
+                self._tasks = [
+                    {
+                        "task_id": f"v{i}",
+                        "task_type": "reference_video",
+                        "media_type": "video",
+                        "payload": {},
+                    }
+                    for i in range(3)
+                ]
+
+            async def claim_next_task(self, media_type, **_kwargs):  # type: ignore[override]
+                if media_type != "video" or not self._tasks:
+                    return None
+                return self._tasks.pop(0)
+
+        queue = _ClaimableQueue()
+        worker = GenerationWorker(queue=queue, capacity=_cap({"agnes": {"image": 0, "video": 7}}))
+
+        async def _extract(_task):
+            return "agnes"
+
+        async def _load_pool(self):
+            self._agnes_key_pool_size = 3
+            return ["k1", "k2", "k3"]
+
+        leased_keys: list[str | None] = []
+
+        async def _fake_execute(task, **_kwargs):
+            from lib.agnes_video_key_lease import get_leased_api_key
+
+            leased_keys.append(get_leased_api_key())
+            await asyncio.sleep(0.05)
+            return {"ok": True}
+
+        monkeypatch.setattr("lib.generation_worker._extract_provider", _extract)
+        monkeypatch.setattr(GenerationWorker, "_load_agnes_video_key_pool", _load_pool)
+        monkeypatch.setattr(
+            "server.services.generation_tasks.execute_generation_task",
+            _fake_execute,
+        )
+
+        claimed = await worker._claim_tasks()
+        assert claimed
+        assert worker._slots.occupied("agnes", "video") == 3
+        assert worker._agnes_key_leases.leased_count() == 3
+
+        await asyncio.gather(*worker._slots.all_active_tasks(), return_exceptions=True)
+        await worker._drain_finished_tasks()
+        assert worker._agnes_key_leases.leased_count() == 0
+        assert set(leased_keys) == {"k1", "k2", "k3"}
+
+    @pytest.mark.unit
+    def test_pool_full_providers_raises_cap_when_agnes_key_pool_cached(self):
+        worker = GenerationWorker(
+            queue=_FakeQueue(),
+            capacity=_cap({"agnes": {"image": 0, "video": 1}}),
+        )
+        worker._agnes_key_pool_size = 3
+        loop = asyncio.new_event_loop()
+        try:
+            fut = loop.create_future()
+            worker._slots.register("agnes", "video", "t1", fut)
+            # Occupied=1, registry cap=1 → 本会满；放大到 pool size 后仍有空位
+            assert worker._pool_full_providers("video") == frozenset()
+            worker._slots.register("agnes", "video", "t2", fut)
+            worker._slots.register("agnes", "video", "t3", fut)
+            assert worker._pool_full_providers("video") == frozenset({"agnes"})
+            fut.cancel()
+        finally:
+            loop.close()
 
     @pytest.mark.unit
     @pytest.mark.asyncio

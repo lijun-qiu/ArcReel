@@ -47,6 +47,11 @@ import {
   isStructuredVideoPrompt,
 } from "@/utils/prompt-shape";
 import { isContinuousIntegerRange } from "@/utils/duration_format";
+import {
+  getScriptItems,
+  itemUsesPreviousStoryboard,
+  resolvePreviousStoryboardRef,
+} from "@/utils/script-shape";
 import type { NarratedVideoDurationAdmission, ReferenceGenerationRequestOptions } from "@/types";
 
 type Segment = NarrationSegment | DramaScene | AdShot;
@@ -688,9 +693,27 @@ export function ShotDetail({
   const productNames = isAd ? Array.from(new Set(adShot?.products_in_shot ?? [])) : [];
   const refsReadOnly = !onUpdatePrompt;
 
+  const script = useProjectsStore((s) =>
+    scriptFile ? s.currentScripts[scriptFile] : null,
+  );
+  const previousStoryboard = useMemo(() => {
+    if (!script) return null;
+    return resolvePreviousStoryboardRef(
+      getScriptItems(script, contentMode),
+      contentMode,
+      segmentId,
+    );
+  }, [script, contentMode, segmentId]);
+  const usePrevious = itemUsesPreviousStoryboard(segment);
+
   const handleRefsSave = async (patch: Record<string, string[]>) => {
     if (!onUpdatePrompt || Object.keys(patch).length === 0) return;
     await onUpdatePrompt(segmentId, patch);
+  };
+
+  const handleTogglePreviousStoryboard = async (enabled: boolean) => {
+    if (!onUpdatePrompt) return;
+    await onUpdatePrompt(segmentId, { use_previous_storyboard: enabled });
   };
 
   const sectionHeaderStyle: React.CSSProperties = {
@@ -787,6 +810,11 @@ export function ShotDetail({
         onSave={handleRefsSave}
         disabled={dirty || saving || refsReadOnly}
         disabledHint={dirty ? dirtyHint : undefined}
+        previousStoryboard={previousStoryboard}
+        usePreviousStoryboard={usePrevious}
+        onTogglePreviousStoryboard={
+          refsReadOnly || dirty || saving ? undefined : handleTogglePreviousStoryboard
+        }
       />
       {/* 对白编辑：narration / ad 编辑扁平 video_prompt.dialogue；drama 台词已迁到场景级
           utterances（判别式台词 + 画外音），此处直接编辑 scene.utterances 并双向保存同步。 */}

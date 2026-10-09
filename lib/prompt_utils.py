@@ -276,8 +276,9 @@ def utterances_to_dialogue(utterances: object) -> list[dict[str, str]]:
     """drama 口型音轨出口：从有序 ``utterances`` 取 dialogue-kind 条目，转成 video YAML 的
     ``{speaker, line}`` 列表（保留时序）。
 
-    voiceover-kind 不进视频提示词（无 speaker，留给字幕 / TTS）。对脏数据稳健：非 list 整体、
-    非 dict/object 元素、非 dialogue 条目一律跳过；dialogue 须 speaker 与 line 同时非空才进口型音轨，
+    voiceover / inner_monologue 不进视频提示词口型音轨（后者挂角色音色但不出说话口型，留给
+    参考生视频路径的 ``<X>内心独白`` 句式 / TTS）。对脏数据稳健：非 list 整体、非 dict/object
+    元素、非 dialogue 条目一律跳过；dialogue 须 speaker 与 line 同时非空才进口型音轨，
     缺 speaker 的脏 dialogue（契约要求 dialogue 必带非空 speaker）不重新喂给 lip-sync / video prompt。
 
     兼容两种条目形态：原始 JSON ``dict`` 与已实例化的 Pydantic ``Utterance`` 模型对象（取同名属性）。

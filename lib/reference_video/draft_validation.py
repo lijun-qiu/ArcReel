@@ -16,10 +16,11 @@ from __future__ import annotations
 
 import re
 import unicodedata
+from collections import Counter
 from collections.abc import Callable, Iterable, Sequence
 from typing import Any
 
-from lib.asset_types import BUCKET_KEY, normalize_asset_bucket
+from lib.asset_types import BUCKET_KEY, asset_name_comparison_key, normalize_asset_bucket
 from lib.reference_video.text_parser import (
     SpeechMark,
     derive_references_from_text,
@@ -31,14 +32,26 @@ from lib.reference_video.text_parser import (
     strip_speech_marks,
 )
 from lib.script_models import ReferenceResource
+from lib.source_dialogue import SourceDialogue, dialogue_key, extract_source_dialogues
 from lib.speech_composition import SpeechProblem, admit_script_unit
 from lib.speech_rate import estimate_spoken_seconds
 
-#: 台词口播时长相对 unit 时长的宽容系数：估算超出 unit 时长这个比例才判超载。
-#: 语速是统计估算（``lib.speech_rate``），逐字计数与真实配音节奏必然有出入；不留宽容会
-#: 把「刚好写满」的正常产出判违约。与 drama 保存期上界 warning 的 20% 同量级——两处都是
-#: 「同一套语速估算 vs 已定时长」的比对，宽容度没有理由不同。
-SPEECH_OVERFLOW_TOLERANCE = 0.20
+#: 台词口播时长相对 unit 时长的宽容系数（5%）：语速是统计估算，给极小出入留余量，
+#: 但不允许把明显更长的口播压进短档（曾用 20% 时，12 秒口播可塞进 10 秒「最短够用档」）。
+#: 与 step1 拆分 prompt「取不低于估算秒数的档位」大体同尺——仅允许估算噪声级的贴边。
+SPEECH_OVERFLOW_TOLERANCE = 0.05
+
+#: 每个可见画面节拍大约需要的秒数。与 step1 拆分 prompt 的「约每 1.5 秒一个独立动作 /
+#: 场面切换」同一口径：prompt 给下界，后校验用同一把尺拒掉「台词短但画面塞爆」的 unit。
+VISUAL_SECONDS_PER_BEAT = 1.5
+
+#: 画面节拍密度相对 unit 时长的宽容系数，与台词超载同量级——节拍切分是启发量，不留宽容会
+#: 把「刚好写满」的正常拆分判违约。
+VISUAL_DENSITY_TOLERANCE = 0.20
+
+#: 画面节拍切分点：中英文句末标点与换行。逗号不切开——中文常在同一动作链里用逗号串细节，
+#: 按逗号计节拍会把「推门、跨门槛、转身」虚高成三拍。
+_VISUAL_BEAT_SPLIT = re.compile(r"[。！？；.!?\n]+")
 
 
 class DraftViolation(ValueError):
@@ -238,7 +251,10 @@ def dialogue_speakers(text: str) -> list[str]:
 
 
 def normative_lines(text: str) -> list[tuple[str, str, str]]:
-    """按出现顺序取出全部发声记号：``(kind, speaker, 台词)``，``kind`` 为 dialogue / voiceover。
+    """按出现顺序取出全部发声记号：``(kind, speaker, 台词)``。
+
+    ``kind`` 为 ``dialogue`` / ``inner_monologue`` / ``voiceover``（与
+    :class:`~lib.reference_video.text_parser.SpeechMark.kind` 同口径）。
 
     step2 的保结构 diff 以此为比对项：画面描述可自由展开，发声记号必须逐字不变。
 
@@ -250,7 +266,7 @@ def normative_lines(text: str) -> list[tuple[str, str, str]]:
     result: list[tuple[str, str, str]] = []
     for line in text.splitlines():
         for mark in line_speech_marks(line):
-            result.append(("dialogue" if mark.speaker else "voiceover", mark.speaker, mark.text))
+            result.append((mark.kind, mark.speaker, mark.text))
     return result
 
 
@@ -314,6 +330,52 @@ def validate_unit_text(
     return refs
 
 
+def validate_source_dialogue_coverage(unit_texts: Sequence[str], novel_text: str) -> None:
+    """源文里的「角色：台词」/「角色（心里话）：台词」必须在某个 unit 的发声记号里出现。
+
+    叙述体源文抽不出对白时直接通过。比对忽略空白、舞台提示括号和句末标点，
+    句中用字必须还在；用口型、比划或「简短回应」顶替的句子过不了这道检查。
+    同一句在源文出现多次时，正文里也要有同样多次。
+
+    开口对白应对 ``@[角色]{台词}``；心里话应对 ``@[角色%内心独白]{台词}``（也接受误写成
+    开口记号——覆盖检查只要求说话人 + 台词在，kind 由书写层 prompt 约束）。
+    """
+
+    needed: Counter[tuple[str, str]] = Counter()
+    sample: dict[tuple[str, str], SourceDialogue] = {}
+    for line in extract_source_dialogues(novel_text):
+        key = (asset_name_comparison_key(line.speaker), dialogue_key(line.text))
+        needed[key] += 1
+        sample.setdefault(key, line)
+    if not needed:
+        return
+
+    found: Counter[tuple[str, str]] = Counter()
+    for text in unit_texts:
+        for kind, speaker, spoken in normative_lines(text):
+            if kind not in ("dialogue", "inner_monologue") or not speaker:
+                continue
+            key = dialogue_key(spoken)
+            if key:
+                found[(asset_name_comparison_key(speaker), key)] += 1
+
+    missing = [sample[key] for key, count in needed.items() if found.get(key, 0) < count]
+    if not missing:
+        return
+
+    def _format(line: SourceDialogue) -> str:
+        label = f"{line.speaker}（心里话）" if line.kind == "inner_monologue" else line.speaker
+        return f"{label}「{line.text}」"
+
+    shown = "；".join(_format(line) for line in missing[:8])
+    extra = f"（另有 {len(missing) - 8} 句）" if len(missing) > 8 else ""
+    raise DraftViolation(
+        f"源文对白未写入正文: {shown}{extra}；开口写成 @[说话人]{{台词}}，"
+        f"心里话写成 @[说话人%内心独白]{{台词}}，禁止用口型、比划或「简短回应」代替",
+        code="source_dialogue_omitted",
+    )
+
+
 def _speech_problem_violation(problem: SpeechProblem) -> DraftViolation:
     locations = ", ".join(
         ".".join(str(part) for part in location.path) + (f" line {location.line}" if location.line is not None else "")
@@ -332,6 +394,39 @@ def _speech_problem_violation(problem: SpeechProblem) -> DraftViolation:
     )
 
 
+def count_visual_beats(text: str) -> int:
+    """统计正文里的可见画面节拍数：剥掉发声记号后，按句末标点 / 换行切开的非空描述段数。
+
+    只看画面描述——台词与画外音另由 :func:`validate_dialogue_load` 按时长下界约束，不计入节拍，
+    避免「一句长对白」被当成多个画面动作。
+    """
+    description = "\n".join(strip_speech_marks(line) for line in text.splitlines())
+    return sum(1 for part in _VISUAL_BEAT_SPLIT.split(description) if part.strip())
+
+
+def validate_visual_density(label: str, text: str, duration_seconds: int) -> None:
+    """校验画面节拍密度：节拍所需秒数超出 unit 时长（含宽容）即违约。
+
+    与台词超载对称：台词只保证「念得完」，本校验保证「看得见的动作链演得完」。单节拍或空描述
+    不拦截——后者由 :func:`validate_unit_text` 的空白画面检查负责；多节拍塞进过短档时给出与
+    台词超载同口径的出路（加长档 / 拆 unit）。
+    """
+    beats = count_visual_beats(text)
+    if beats <= 1:
+        return
+    needed = beats * VISUAL_SECONDS_PER_BEAT
+    budget = duration_seconds * (1 + VISUAL_DENSITY_TOLERANCE)
+    if needed > budget:
+        raise DraftViolation(
+            f"{label} 的画面约有 {beats} 个可见节拍（约需 {needed:.1f} 秒），"
+            f"超过该 unit 的 {duration_seconds} 秒"
+            f"（宽容 {VISUAL_DENSITY_TOLERANCE:.0%} 后上限 {budget:.1f} 秒）；"
+            "请改取更长的时长档，或按自然节拍把该 unit 拆开",
+            code="visual_density_overload",
+            label=label,
+        )
+
+
 def validate_dialogue_load(
     label: str,
     text: str,
@@ -344,7 +439,7 @@ def validate_dialogue_load(
     时长就是计费，unit 时长在 step1 定稿；台词写超了意味着成片必然吞词或抢拍，且这在
     step1 阶段是可改的（重拆 unit 或删台词），拖到生成后才发现只能重来。
     ``speech_rate_override`` 是项目级语速覆盖，None 即回退语言默认——与 prompt 构造侧同源，
-    prompt 给的下界与此处判的上界始终是同一把尺。
+    prompt 给的下界与此处判的上界始终是同一把尺（默认 5% 估算噪声宽容）。
     """
     # language 取自 project.json，可能是非字符串脏数据；非字符串回退 None（按默认语速估算），
     # 与 prompt 构造侧同口径——否则 ``count_reading_units`` 的 ``language.strip()`` 会在一次
@@ -356,9 +451,13 @@ def validate_dialogue_load(
     spoken = sum(estimate_spoken_seconds(line[2], language, speech_rate_override) for line in normative_lines(text))
     budget = duration_seconds * (1 + SPEECH_OVERFLOW_TOLERANCE)
     if spoken > budget:
+        slack = (
+            f"（宽容 {SPEECH_OVERFLOW_TOLERANCE:.0%} 后上限 {budget:.1f} 秒）"
+            if SPEECH_OVERFLOW_TOLERANCE > 0
+            else ""
+        )
         raise DraftViolation(
-            f"{label} 的台词念完约需 {spoken:.1f} 秒，超过该 unit 的 {duration_seconds} 秒"
-            f"（宽容 {SPEECH_OVERFLOW_TOLERANCE:.0%} 后上限 {budget:.1f} 秒）；"
+            f"{label} 的台词念完约需 {spoken:.1f} 秒，超过该 unit 的 {duration_seconds} 秒{slack}；"
             "请改取更长的时长档、把该 unit 拆开，或精简台词",
             code="dialogue_overload",
             label=label,
@@ -395,15 +494,20 @@ def assert_dialogue_preserved(label: str, step1_text: str, step2_text: str) -> N
 
 __all__ = [
     "SPEECH_OVERFLOW_TOLERANCE",
+    "VISUAL_DENSITY_TOLERANCE",
+    "VISUAL_SECONDS_PER_BEAT",
     "DraftViolation",
     "DraftViolations",
     "assert_dialogue_preserved",
     "collect_violations",
+    "count_visual_beats",
     "dialogue_speakers",
     "normative_lines",
     "render_violation_report",
     "validate_dialogue_load",
+    "validate_source_dialogue_coverage",
     "validate_source_text_anchor",
     "validate_unit_text",
+    "validate_visual_density",
     "violation_items",
 ]

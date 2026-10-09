@@ -28,7 +28,7 @@ if TYPE_CHECKING:
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from fastapi import Path as FastAPIPath
 from fastapi.responses import FileResponse, JSONResponse
-from pydantic import BaseModel, BeforeValidator, ConfigDict, Field
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, model_validator
 from pydantic import ValidationError as PydanticValidationError
 from starlette.background import BackgroundTask
 
@@ -213,6 +213,28 @@ class EpisodePatch(BaseModel):
     script_file: str | None = None
 
 
+class LocalH3Settings(BaseModel):
+    """本机 H3 推理偏好（仅供外部 Comfy/脚本读取，不进生成队列）。
+
+    path: ref2v=参考图生视频（ref2va），fl2v=分镜/首尾帧生视频（fl2va）。
+    step_mode: manual=硬减步数；distill_8/4=加载对应 turbo LoRA 并固定 8/4 步。
+    """
+
+    model_config = ConfigDict(extra="ignore")
+    quant: Literal["int8", "fp8", "gguf"] = "int8"
+    path: Literal["ref2v", "fl2v"] = "ref2v"
+    step_mode: Literal["manual", "distill_8", "distill_4"] = "manual"
+    steps: int = Field(default=12, ge=4, le=40)
+
+    @model_validator(mode="after")
+    def _lock_distill_steps(self) -> LocalH3Settings:
+        if self.step_mode == "distill_8":
+            self.steps = 8
+        elif self.step_mode == "distill_4":
+            self.steps = 4
+        return self
+
+
 class UpdateProjectRequest(BaseModel):
     title: str | None = None
     style: str | None = None
@@ -245,6 +267,22 @@ class UpdateProjectRequest(BaseModel):
     clear_style_image: bool | None = None
     episodes: list[EpisodePatch] | None = None
     model_settings: dict[str, dict[str, str | None]] | None = None
+    # 分集规划：单批源文窗口字数 / 单批集数上限；null = 清除并回退工具内部默认
+    planning_window_chars: int | None = None
+    planning_max_episodes: int | None = None
+    # 分集切分模式：llm | markers；null = 清除并回退 llm
+    planning_split_mode: Literal["llm", "markers"] | None = None
+    # step1 审片闸自动放行；null = 清除并回退关闭
+    auto_confirm_step1: bool | None = None
+    # 本地 MiniMax H3 偏好（仅供外部 Comfy/脚本读取，不进 ArcReel 生成队列）
+    local_h3: LocalH3Settings | None = None
+
+
+class PlanByMarkersRequest(BaseModel):
+    """按「第N集/章/回」「场景N」等标记切分。overwrite=true 时先全量重置账本再切。"""
+
+    model_config = ConfigDict(extra="ignore")
+    overwrite: bool = False
 
 
 def _cleanup_temp_file(path: str) -> None:
@@ -942,6 +980,50 @@ async def update_project(name: str, req: UpdateProjectRequest, _t: Translator):
                     else:
                         project["model_settings"] = req.model_settings
 
+                for planning_field in ("planning_window_chars", "planning_max_episodes"):
+                    if planning_field not in req.model_fields_set:
+                        continue
+                    value = getattr(req, planning_field)
+                    if value is None:
+                        project.pop(planning_field, None)
+                    elif isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                        raise HTTPException(
+                            status_code=422,
+                            detail=_t(
+                                "planning_setting_must_be_positive_integer",
+                                field=planning_field,
+                                value=value,
+                            ),
+                        )
+                    else:
+                        project[planning_field] = value
+
+                if "planning_split_mode" in req.model_fields_set:
+                    if req.planning_split_mode is None:
+                        project.pop("planning_split_mode", None)
+                    elif req.planning_split_mode not in ("llm", "markers"):
+                        raise HTTPException(
+                            status_code=422,
+                            detail=_t(
+                                "planning_split_mode_invalid",
+                                value=req.planning_split_mode,
+                            ),
+                        )
+                    else:
+                        project["planning_split_mode"] = req.planning_split_mode
+
+                if "auto_confirm_step1" in req.model_fields_set:
+                    if req.auto_confirm_step1 is None:
+                        project.pop("auto_confirm_step1", None)
+                    else:
+                        project["auto_confirm_step1"] = bool(req.auto_confirm_step1)
+
+                if "local_h3" in req.model_fields_set:
+                    if req.local_h3 is None:
+                        project.pop("local_h3", None)
+                    else:
+                        project["local_h3"] = req.local_h3.model_dump()
+
                 if "episodes" in req.model_fields_set and req.episodes is not None:
                     # 合并 episodes：保留现有 episode 的完整数据，仅更新请求中显式提供的字段。
                     # 使用 model_fields_set（而非 exclude_none）判断字段是否显式出现，使得
@@ -1091,6 +1173,7 @@ async def update_scene(name: str, scene_id: str, req: UpdateSceneRequest, _t: Tr
                 "segment_break",
                 "utterances",
                 "note",
+                "use_previous_storyboard",
             }
             fields: dict[str, Any] = {}
             for key, raw_value in req.updates.items():
@@ -1151,6 +1234,7 @@ _SHOT_UPDATABLE_FIELDS = (
     "products_in_shot",
     "transition_to_next",
     "note",
+    "use_previous_storyboard",
 )
 
 
@@ -1294,6 +1378,7 @@ class UpdateSegmentRequest(BaseModel):
     video_prompt: dict | str | None = None
     transition_to_next: str | None = None
     note: str | None = None
+    use_previous_storyboard: bool | None = None
     characters_in_segment: list[str] | None = None
     scenes: list[str] | None = None
     props: list[str] | None = None
@@ -1340,6 +1425,7 @@ async def update_segment(name: str, segment_id: str, req: UpdateSegmentRequest, 
                 "image_prompt",
                 "video_prompt",
                 "transition_to_next",
+                "use_previous_storyboard",
             ):
                 value = getattr(req, field)
                 if value is not None:
@@ -1378,6 +1464,83 @@ async def update_segment(name: str, segment_id: str, req: UpdateSegmentRequest, 
         raise
     except Exception:
         logger.exception("请求处理失败")
+        raise HTTPException(status_code=500, detail=_t("internal_server_error"))
+
+
+@router.post("/projects/{name}/episodes/plan-by-markers")
+async def plan_episodes_by_markers(name: str, req: PlanByMarkersRequest, _t: Translator):
+    """按源文「第N集/章/回」「场景N」等标题行规则切分账本，不调用文本模型。
+
+    ``overwrite=true`` 时先全量重置分集规划（含已消费集确认），再规则切分。
+    """
+    from lib.episode_planner import EpisodePlanner, EpisodePlanningError
+    from lib.episode_reset import (
+        EpisodeResetError,
+        ResetConfirmationRequired,
+        reset_episode_planning,
+    )
+
+    try:
+
+        def _sync():
+            manager = get_project_manager()
+            if not manager.project_exists(name):
+                raise FileNotFoundError(name)
+            project_path = manager.get_project_path(name)
+            project = manager.load_project(name)
+            if project.get("content_mode") == "ad":
+                raise HTTPException(status_code=400, detail=_t("ad_no_episode_planning"))
+
+            episodes = project.get("episodes") or []
+            if episodes and not req.overwrite:
+                raise HTTPException(status_code=409, detail=_t("plan_by_markers_needs_overwrite"))
+
+            if episodes and req.overwrite:
+                reset_result = reset_episode_planning(
+                    project_path, from_episode=1, confirm_consumed=True
+                )
+                if isinstance(reset_result, ResetConfirmationRequired):
+                    # confirm_consumed=True 时不应再回到确认态；若出现则视为冲突
+                    raise HTTPException(
+                        status_code=409,
+                        detail=_t(
+                            "plan_by_markers_reset_confirmation",
+                            episodes="、".join(str(n) for n in reset_result.consumed_episodes),
+                        ),
+                    )
+
+            with project_change_source("webui"):
+                result = EpisodePlanner(project_path).plan_by_markers()
+                project = manager.load_project(name)
+            return {
+                "success": True,
+                "project": project,
+                "episodes": [
+                    {
+                        "episode": ep.episode,
+                        "title": ep.title,
+                        "hook": ep.hook,
+                        "reading_units": ep.reading_units,
+                        "ledger_status": ep.ledger_status,
+                    }
+                    for ep in result.episodes
+                ],
+                "total_planned": result.total_planned,
+                "source_exhausted": result.source_exhausted,
+                "stale_episodes": result.stale_episodes,
+            }
+
+        return await asyncio.to_thread(_sync)
+    except FileNotFoundError as exc:
+        raise NotFoundError("project_not_found", name=name) from exc
+    except EpisodePlanningError as exc:
+        raise UnprocessableError("plan_by_markers_failed").with_diagnostic(str(exc)) from exc
+    except EpisodeResetError as exc:
+        raise UnprocessableError("plan_by_markers_reset_failed").with_diagnostic(str(exc)) from exc
+    except (HTTPException, ApiError):
+        raise
+    except Exception:
+        logger.exception("按标记分集失败")
         raise HTTPException(status_code=500, detail=_t("internal_server_error"))
 
 

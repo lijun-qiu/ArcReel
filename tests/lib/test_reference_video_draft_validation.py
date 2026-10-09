@@ -9,11 +9,14 @@ from lib.reference_video.draft_validation import (
     DraftViolation,
     DraftViolations,
     assert_dialogue_preserved,
+    count_visual_beats,
     dialogue_speakers,
     normative_lines,
     validate_dialogue_load,
+    validate_source_dialogue_coverage,
     validate_source_text_anchor,
     validate_unit_text,
+    validate_visual_density,
 )
 
 pytestmark = pytest.mark.unit
@@ -214,11 +217,25 @@ class TestDialogueLoad:
         with pytest.raises(DraftViolation, match="超过该 unit"):
             validate_dialogue_load("unit E1U01", f"镜头1：门开了\n@[李明]：{{{long_line}}}", 4, "zh")
 
-    def test_tolerance_admits_slight_overrun(self):
-        """宽容系数内放行：语速是统计估算，「刚好写满」的正常产出不该被判违约。"""
-        # 21 字 ÷ 5 字/秒 = 4.2 秒，落在 4 秒 × 1.2 = 4.8 秒的宽容上限内
+    def test_exact_spoken_fit_accepted(self):
+        """口播估算刚好等于时长 → 放行。"""
+        # 20 字 ÷ 5 字/秒 = 4.0 秒
         line = "一二三四五六七八九十一二三四五六七八九十。"
         validate_dialogue_load("unit E1U01", f"@[李明]：{{{line}}}", 4, "zh")
+
+    def test_within_five_percent_tolerance_accepted(self):
+        """5% 宽容内放行：仅覆盖语速估算噪声级出入。"""
+        # 21 字 ÷ 5 字/秒 = 4.2 秒，落在 4 秒 × 1.05 = 4.2 秒上限内
+        line = "一二三四五六七八九十一二三四五六七八九十多。"
+        validate_dialogue_load("unit E1U01", f"@[李明]：{{{line}}}", 4, "zh")
+
+    def test_beyond_five_percent_tolerance_rejected(self):
+        """超出 5% 即拒：12 秒口播不得再靠宽容压进 10 秒档。"""
+        # 22 字 ÷ 5 字/秒 = 4.4 秒 > 4 秒 × 1.05 = 4.2 秒
+        line = "一二三四五六七八九十一二三四五六七八九十多多。"
+        with pytest.raises(DraftViolation, match="超过该 unit") as exc_info:
+            validate_dialogue_load("unit E1U01", f"@[李明]：{{{line}}}", 4, "zh")
+        assert exc_info.value.code == "dialogue_overload"
 
     def test_voiceover_counts_toward_budget(self):
         long_line = "画外音很长很长的一段" * 6
@@ -241,6 +258,34 @@ class TestDialogueLoad:
         line = "Anh ấy mở cửa quán rượu ngay lập tức"
         text = f"镜头1：@[李明] 推门\n@[李明]：{{{unicodedata.normalize('NFD', line)}}}"
         validate_dialogue_load("unit E1U01", text, 4, "vi")
+
+
+class TestVisualDensity:
+    def test_sparse_action_accepted(self):
+        validate_visual_density("unit E1U01", "@[李明] 推开门。跨过门槛。", 4)
+
+    def test_single_beat_always_accepted(self):
+        """单节拍不按密度拦——任意正时长档都能演完一个动作。"""
+        validate_visual_density("unit E1U01", "@[李明] 猛地睁开眼", 4)
+
+    def test_dense_action_rejected(self):
+        # 6 节拍 × 1.5s = 9s > 4s × 1.2 = 4.8s
+        text = "@[李明] 猛地睁开眼。吊灯坏了一个灯泡。他大口喘息。手机屏幕亮起。他盯着红字。他冲进洗手间。"
+        with pytest.raises(DraftViolation, match="可见节拍") as exc_info:
+            validate_visual_density("unit E1U01", text, 4)
+        assert exc_info.value.code == "visual_density_overload"
+
+    def test_speech_marks_do_not_count_as_beats(self):
+        """长台词不虚高节拍：密度只看画面描述。"""
+        long_line = "这是一段非常长的台词" * 6
+        validate_visual_density("unit E1U01", f"@[李明] 推开门。\n@[李明]：{{{long_line}}}", 4)
+
+    def test_tolerance_admits_borderline_beats(self):
+        """3 节拍 × 1.5 = 4.5s，落在 4s × 1.2 = 4.8s 宽容内。"""
+        validate_visual_density("unit E1U01", "@[李明] 推开门。跨过门槛。转身环顾。", 4)
+
+    def test_count_visual_beats_splits_on_sentence_ends(self):
+        assert count_visual_beats("@[李明] 推门。坐下！抬头？沉默；\n再起身。") == 5
 
 
 class TestNormativeLines:
@@ -290,3 +335,43 @@ class TestDialoguePreserved:
     def test_dropped_dialogue_rejected(self):
         with pytest.raises(DraftViolation, match="台词条数被改动"):
             assert_dialogue_preserved("unit E1U01", self.STEP1, "镜头1：@[李明] 推门")
+
+
+class TestSourceDialogueCoverage:
+    def test_prose_source_passes(self):
+        validate_source_dialogue_coverage(["镜头1：门开了"], "五百万只是起步。")
+
+    def test_marked_line_passes_without_stage_direction(self):
+        source = "林北：（打断）全部转到这张卡里。\n客户经理：全部？"
+        units = [
+            "茶几上咖啡冒着热气。@[林北]{全部转到这张卡里。}@[客户经理]{全部？}",
+        ]
+        validate_source_dialogue_coverage(units, source)
+
+    def test_lip_sync_substitute_is_omitted(self):
+        source = "工作人员：先生，您确定不办个VIP——"
+        units = ["一个工作人员追出来，口型急切。"]
+        with pytest.raises(DraftViolation, match="工作人员") as caught:
+            validate_source_dialogue_coverage(units, source)
+        assert caught.value.code == "source_dialogue_omitted"
+        assert "工作人员" in str(caught.value)
+
+    def test_shorter_line_does_not_cover_a_longer_one(self):
+        """「全部」不能算覆盖了「全部转到这张卡里」。"""
+        source = "林北：全部转到这张卡里。\n林北：全部。"
+        units = ["@[林北]{全部。}"]
+        with pytest.raises(DraftViolation, match="全部转到这张卡里"):
+            validate_source_dialogue_coverage(units, source)
+
+    def test_心里话_covered_by_inner_monologue_mark(self):
+        source = "阿杰（心里话）：男生的遗憾，是从一枚奇趣蛋开始的。\n阿杰：我想吃这个。"
+        units = [
+            "@[阿杰%内心独白]{男生的遗憾，是从一枚奇趣蛋开始的。}@[阿杰]{我想吃这个。}",
+        ]
+        validate_source_dialogue_coverage(units, source)
+
+    def test_心里话_also_covered_if_written_as_spoken_mark(self):
+        """覆盖检查只要求说话人+台词在；kind 由书写 prompt 约束。"""
+        source = "阿杰（心里话）：男生的遗憾，是从一枚奇趣蛋开始的。"
+        units = ["@[阿杰]{男生的遗憾，是从一枚奇趣蛋开始的。}"]
+        validate_source_dialogue_coverage(units, source)

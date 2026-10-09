@@ -177,6 +177,26 @@ class TestWithRetryAsync:
                 await fn()
         assert mock_fn.call_count == 3
 
+    async def test_unlimited_retries_until_success(self):
+        """max_attempts=None：可重试错误持续重试，直到成功。"""
+        errors = [ConnectionError(f"attempt {i}") for i in range(8)]
+        mock_fn = AsyncMock(side_effect=[*errors, "ok"])
+
+        @with_retry_async(max_attempts=None, backoff_seconds=(120,))
+        async def fn():
+            return await mock_fn()
+
+        with (
+            patch("lib.retry.asyncio.sleep", new_callable=AsyncMock) as mock_sleep,
+            patch("lib.retry.random.uniform", return_value=0.0),
+        ):
+            result = await fn()
+
+        assert result == "ok"
+        assert mock_fn.call_count == 9
+        assert mock_sleep.call_count == 8
+        assert all(call.args[0] == 120.0 for call in mock_sleep.call_args_list)
+
     async def test_custom_retryable_errors(self):
         class CustomError(Exception):
             pass
@@ -301,6 +321,27 @@ class TestWithRetryAsync:
         with pytest.raises(_Truncated):
             await fn()
         assert mock_fn.call_count == 1
+
+    async def test_on_retry_callback_invoked_before_sleep(self):
+        mock_fn = AsyncMock(side_effect=[ConnectionError("reset"), "ok"])
+        seen: list[tuple[int, float]] = []
+
+        async def _on_retry(exc: Exception, attempt: int, wait: float) -> None:
+            seen.append((attempt, wait))
+            assert isinstance(exc, ConnectionError)
+
+        @with_retry_async(
+            max_attempts=3,
+            backoff_seconds=(1, 2, 4),
+            on_retry=_on_retry,
+        )
+        async def fn():
+            return await mock_fn()
+
+        with patch("lib.retry._compute_wait", lambda attempt, backoff: 0.5):
+            assert await fn() == "ok"
+        assert seen == [(1, 0.5)]
+        assert mock_fn.call_count == 2
 
 
 class TestDownloadConstants:

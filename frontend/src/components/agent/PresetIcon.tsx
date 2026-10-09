@@ -29,6 +29,7 @@ const ICON_LOADERS: Record<string, IconLoader> = {
   KwaiKAT: () => import("@lobehub/icons/es/KwaiKAT/components/Mono"),
   LongCat: () => import("@lobehub/icons/es/LongCat/components/Color"),
   Minimax: () => import("@lobehub/icons/es/Minimax/components/Color"),
+  ModelScope: () => import("@lobehub/icons/es/ModelScope/components/Color"),
   Moonshot: () => import("@lobehub/icons/es/Moonshot/components/Mono"),
   Nvidia: () => import("@lobehub/icons/es/Nvidia/components/Color"),
   OpenAI: () => import("@lobehub/icons/es/OpenAI/components/Mono"),

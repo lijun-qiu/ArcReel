@@ -79,6 +79,11 @@ export interface ReferenceRequestOptions {
 export interface ReferenceGenerationRequestOptions extends ReferenceRequestOptions {
   /** Exact video tier accepted for this request; omitted when no cross-tier confirmation is needed. */
   confirmed_request_duration_seconds?: number | null;
+  /**
+   * Manual batch only (timeline or reference-video batch): lease Agnes key-pool
+   * concurrency (one key per in-flight video). Omit on single-shot / agent paths.
+   */
+  use_agnes_key_pool?: boolean;
 }
 
 export interface ReferenceProjectionLocation {
@@ -196,6 +201,8 @@ export interface ReferenceBatchGenerateRequest {
   narration_delivery: "post_production" | "use_tts";
   /** 用户已确认的申请档位，按 unit 给 */
   confirmed_request_durations?: Record<string, number>;
+  /** 手动批量：按 Agnes Key 池并发；单镜 / Agent 不要开。 */
+  use_agnes_key_pool?: boolean;
 }
 
 /**
@@ -207,6 +214,7 @@ export interface ReferenceBatchGenerateRequest {
 /** `index` 是 1-based 的 utterance 序号，按正文出现顺序编号。 */
 export type ScriptPreviewUtterance =
   | { index: number; kind: "dialogue"; speaker: string; text: string }
+  | { index: number; kind: "inner_monologue"; speaker: string; text: string }
   | { index: number; kind: "voiceover"; speaker: null; text: string };
 
 export interface ScriptPreviewWarning {

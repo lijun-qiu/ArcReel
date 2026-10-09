@@ -119,6 +119,13 @@ describe("ReferenceVideoCanvas", () => {
       model_id: "kling-v2-1-master",
       problems: [],
     });
+    vi.spyOn(API, "getReferenceEpisodePreview").mockResolvedValue({
+      exists: false,
+      relative_path: null,
+      url: null,
+      subtitles_webvtt: null,
+      subtitles: [],
+    });
   });
   afterEach(() => vi.restoreAllMocks());
 
@@ -127,6 +134,13 @@ describe("ReferenceVideoCanvas", () => {
     render(<ReferenceVideoCanvas projectName="proj" episode={1} />);
     await waitFor(() => expect(screen.getByTestId("unit-row-E1U1")).toBeInTheDocument());
     expect(screen.getByTestId("unit-row-E1U2")).toBeInTheDocument();
+  });
+
+  it("renders when a unit is missing generated_assets", async () => {
+    const incomplete = { ...mkUnit("E1U1"), generated_assets: undefined } as unknown as ReferenceVideoUnit;
+    vi.spyOn(API, "listReferenceVideoUnits").mockResolvedValue({ units: [incomplete] });
+    render(<ReferenceVideoCanvas projectName="proj" episode={1} />);
+    await waitFor(() => expect(screen.getByTestId("unit-row-E1U1")).toBeInTheDocument());
   });
 
   it("keeps request controls outside the tablist semantics", async () => {
@@ -271,6 +285,68 @@ describe("ReferenceVideoCanvas", () => {
     } as never);
     expect(await screen.findByRole("button", { name: /重新生成旁白|Regenerate narration/ })).toBeInTheDocument();
     expect(document.querySelector('audio[src*="audio/segment_E1U1.wav"]')).not.toBeNull();
+  });
+
+  // 「使用当前 TTS」旁白旁的一键补旁白：只入队缺音频或最新 TTS 失败的单元，逐个请求，
+  // 已有可用旁白的跳过；进行中的跳过。
+  it("一键生成旁白只补未生成与失败项，且逐个入队", async () => {
+    const missing = mkUnit("E1U1", "{夜色深沉。}");
+    const failed = mkUnit("E1U2", "{别老吃零食。}");
+    failed.generated_assets.narration_audio = "audio/segment_E1U2.wav";
+    const ready = mkUnit("E1U3", "{生日快乐。}");
+    ready.generated_assets.narration_audio = "audio/segment_E1U3.wav";
+    const dialogueOnly = mkUnit("E1U4", "张三：你好。");
+    vi.spyOn(API, "listReferenceVideoUnits").mockResolvedValue({
+      units: [missing, failed, ready, dialogueOnly],
+    });
+    useProjectsStore.setState({
+      currentProjectName: "proj",
+      currentProjectData: {
+        ...STUB_PROJECT,
+        episodes: [{ episode: 1, title: "", script_file: "episode_1.json" }],
+      },
+    });
+    act(() => {
+      useTasksStore.setState({
+        tasks: [
+          {
+            task_id: "tts-fail-u2",
+            project_name: "proj",
+            task_type: "tts",
+            resource_id: "E1U2",
+            status: "failed",
+            updated_at: "2026-06-12T10:00:00Z",
+            error_message: "provider 429",
+          },
+        ] as never,
+      });
+    });
+    const generate = vi
+      .spyOn(API, "generateNarrationAudio")
+      .mockResolvedValueOnce({ success: true, task_id: "tts-a", deduped: false, message: "queued" })
+      .mockResolvedValueOnce({ success: true, task_id: "tts-b", deduped: false, message: "queued" });
+
+    render(<ReferenceVideoCanvas projectName="proj" episode={1} />);
+    fireEvent.click(await screen.findByRole("button", { name: /Use current TTS|使用当前 TTS/ }));
+    const fill = await screen.findByRole("button", {
+      name: /一键生成旁白|Generate missing narration/,
+    });
+    await waitFor(() => expect(fill).not.toBeDisabled());
+    fireEvent.click(fill);
+
+    await waitFor(() => expect(generate).toHaveBeenCalledTimes(2));
+    expect(generate).toHaveBeenNthCalledWith(1, "proj", "E1U1", "episode_1.json");
+    expect(generate).toHaveBeenNthCalledWith(2, "proj", "E1U2", "episode_1.json");
+  });
+
+  it("未选使用当前 TTS 时不展示一键生成旁白", async () => {
+    const unit = mkUnit("E1U1", "{夜色深沉。}");
+    vi.spyOn(API, "listReferenceVideoUnits").mockResolvedValue({ units: [unit] });
+    render(<ReferenceVideoCanvas projectName="proj" episode={1} />);
+    await screen.findByRole("button", { name: /Use current TTS|使用当前 TTS/ });
+    expect(
+      screen.queryByRole("button", { name: /一键生成旁白|Generate missing narration/ }),
+    ).not.toBeInTheDocument();
   });
 
   // 正文是单一真相：保存把编辑器里那段文本原样送到 PATCH 的 prompt 位，
@@ -757,7 +833,68 @@ describe("ReferenceVideoCanvas", () => {
     expect(batchSpy).toHaveBeenCalledWith("proj", 1, {
       unit_ids: ["E1U1", "E1U2", "E1U3"],
       narration_delivery: "post_production",
+      use_agnes_key_pool: true,
     });
+  });
+
+  it("批量取消对本集排队/运行中的参考视频任务逐条 cancelTask", async () => {
+    vi.spyOn(API, "listReferenceVideoUnits").mockResolvedValue({
+      units: [mkUnit("E1U1"), mkUnit("E1U2"), mkUnit("E1U3")],
+    });
+    const cancelSpy = vi.spyOn(API, "cancelTask").mockResolvedValue({
+      cancelled: [],
+      cancelling: [],
+      skipped_terminal: [],
+    });
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+
+    act(() => {
+      useTasksStore.setState({
+        tasks: [runningTask("E1U1"), { ...runningTask("E1U2"), status: "queued" }] as never,
+      });
+    });
+
+    render(<ReferenceVideoCanvas projectName="proj" episode={1} />);
+    const cancel = await screen.findByRole("button", { name: /Cancel batch|批量取消|Hủy hàng loạt/ });
+    await waitFor(() => expect(cancel).not.toBeDisabled());
+
+    fireEvent.click(cancel);
+    await waitFor(() => expect(cancelSpy).toHaveBeenCalledTimes(2));
+    expect(cancelSpy).toHaveBeenCalledWith("task-E1U1");
+    expect(cancelSpy).toHaveBeenCalledWith("task-E1U2");
+    expect(confirmSpy).toHaveBeenCalled();
+    confirmSpy.mockRestore();
+  });
+
+  it("批量生成一次最多提交 7 个 unit，超出部分留到下一批", async () => {
+    const many = Array.from({ length: 10 }, (_, i) => mkUnit(`E1U${i + 1}`));
+    vi.spyOn(API, "listReferenceVideoUnits").mockResolvedValue({ units: many });
+    const batchSpy = vi
+      .spyOn(API, "generateReferenceVideoBatch")
+      .mockResolvedValue(mkAdmission());
+    const pushToast = vi.spyOn(useAppStore.getState(), "pushToast");
+
+    render(<ReferenceVideoCanvas projectName="proj" episode={1} />);
+    const batch = await screen.findByRole("button", { name: /Batch generate videos|批量生成视频/ });
+    await waitFor(() => expect(batch).not.toBeDisabled());
+    fireEvent.click(batch);
+
+    await waitFor(() => expect(batchSpy).toHaveBeenCalledTimes(1));
+    const payload = batchSpy.mock.calls[0][2] as { unit_ids: string[] };
+    expect(payload.unit_ids).toHaveLength(7);
+    expect(payload.unit_ids).toEqual([
+      "E1U1",
+      "E1U2",
+      "E1U3",
+      "E1U4",
+      "E1U5",
+      "E1U6",
+      "E1U7",
+    ]);
+    expect(pushToast).toHaveBeenCalledWith(
+      expect.stringMatching(/最多 7|At most 7|Tối đa 7/),
+      "info",
+    );
   });
 
   it("批量入口一次请求走服务端准入，admitted 时提示已入队", async () => {
@@ -781,6 +918,7 @@ describe("ReferenceVideoCanvas", () => {
       expect(batchSpy).toHaveBeenCalledWith("proj", 1, {
         unit_ids: ["E1U1", "E1U2"],
         narration_delivery: "post_production",
+        use_agnes_key_pool: true,
       }),
     );
     // 不再逐个串行入队
@@ -789,6 +927,49 @@ describe("ReferenceVideoCanvas", () => {
       expect(useAppStore.getState().toast?.text).toMatch(/已提交 2 个视频生成任务|Queued 2 video/);
     });
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+
+  // 批量语义：未生成（pending）与失败应一并提交。
+  // 失败无成片：statusMap=failed；失败但旧成片仍在（重新生成失败）：展示为 ready，
+  // 仍须进批量——否则用户从通知知道失败后点批量，只会补 pending、漏掉重试。
+  it("批量生成把未生成与失败的 unit 一并提交", async () => {
+    const succeededThenFailed = mkUnit("E1U2");
+    succeededThenFailed.generated_assets.video_clip = "videos/E1U2.mp4";
+    const readyOk = mkUnit("E1U3");
+    readyOk.generated_assets.video_clip = "videos/E1U3.mp4";
+    vi.spyOn(API, "listReferenceVideoUnits").mockResolvedValue({
+      units: [mkUnit("E1U1"), succeededThenFailed, readyOk],
+    });
+    const batchSpy = vi
+      .spyOn(API, "generateReferenceVideoBatch")
+      .mockResolvedValue(mkAdmission());
+    act(() => {
+      useTasksStore.setState({
+        tasks: [
+          {
+            task_id: "fail-u2",
+            project_name: "proj",
+            task_type: "reference_video",
+            resource_id: "E1U2",
+            status: "failed",
+            updated_at: "2026-06-12T10:00:00Z",
+            error_message: "provider 429",
+          },
+        ] as never,
+      });
+    });
+
+    render(<ReferenceVideoCanvas projectName="proj" episode={1} />);
+    const batch = await screen.findByRole("button", { name: /Batch generate videos|批量生成视频/ });
+    await waitFor(() => expect(batch).not.toBeDisabled());
+    fireEvent.click(batch);
+
+    await waitFor(() => expect(batchSpy).toHaveBeenCalledTimes(1));
+    expect(batchSpy).toHaveBeenCalledWith("proj", 1, {
+      unit_ids: ["E1U1", "E1U2"],
+      narration_delivery: "post_production",
+      use_agnes_key_pool: true,
+    });
   });
 
   // 交付方式是本次请求的一部分，批量与单元入口读同一个画布选择：批量不带上它，
@@ -808,6 +989,23 @@ describe("ReferenceVideoCanvas", () => {
       "proj",
       1,
       expect.objectContaining({ narration_delivery: "use_tts" }),
+    );
+  });
+
+  it("批量入口带上 Agnes Key 池并发标志", async () => {
+    vi.spyOn(API, "listReferenceVideoUnits").mockResolvedValue({ units: [mkUnit("E1U1")] });
+    const batchSpy = vi
+      .spyOn(API, "generateReferenceVideoBatch")
+      .mockResolvedValue(mkAdmission());
+
+    render(<ReferenceVideoCanvas projectName="proj" episode={1} />);
+    fireEvent.click(await screen.findByRole("button", { name: /Batch generate videos|批量生成视频/ }));
+
+    await waitFor(() => expect(batchSpy).toHaveBeenCalled());
+    expect(batchSpy).toHaveBeenCalledWith(
+      "proj",
+      1,
+      expect.objectContaining({ use_agnes_key_pool: true }),
     );
   });
 
@@ -881,6 +1079,7 @@ describe("ReferenceVideoCanvas", () => {
     expect(batchSpy).toHaveBeenCalledWith("proj", 1, {
       unit_ids: ["E1U2"],
       narration_delivery: "post_production",
+      use_agnes_key_pool: true,
     });
   });
 
@@ -1166,6 +1365,7 @@ describe("ReferenceVideoCanvas", () => {
       expect(batchSpy).toHaveBeenLastCalledWith("proj", 1, {
         unit_ids: ["E1U1", "E1U2", "E1U3"],
         narration_delivery: "post_production",
+        use_agnes_key_pool: true,
         confirmed_request_durations: { E1U1: 8, E1U2: 8, E1U3: 4 },
       });
       await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
@@ -1222,6 +1422,7 @@ describe("ReferenceVideoCanvas", () => {
       expect(batchSpy).toHaveBeenLastCalledWith("proj", 1, {
         unit_ids: ["E1U2"],
         narration_delivery: "post_production",
+        use_agnes_key_pool: true,
         confirmed_request_durations: { E1U2: 4 },
       });
     });

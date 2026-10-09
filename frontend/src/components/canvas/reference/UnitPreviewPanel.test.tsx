@@ -91,6 +91,46 @@ describe("UnitPreviewPanel", () => {
     expect(container.querySelector('input[type="file"]')).toBeNull();
   });
 
+  it("shows upscale control when clip and onUpscaleVideo are present", () => {
+    const onUpscaleVideo = vi.fn();
+    const unit = mkUnit({
+      generated_assets: {
+        ...mkUnit().generated_assets,
+        status: "completed",
+        video_clip: "reference_videos/E1U1.mp4",
+      },
+    });
+    render(
+      <UnitPreviewPanel
+        unit={unit}
+        projectName="proj"
+        status="ready"
+        onUpscaleVideo={onUpscaleVideo}
+      />,
+    );
+    const btn = screen.getByRole("button", { name: /Upscale video|超分视频/ });
+    fireEvent.click(btn);
+    expect(onUpscaleVideo).toHaveBeenCalledWith("E1U1");
+  });
+
+  it("shows upscale even when status is ready but player url is unavailable", () => {
+    const unit = mkUnit({
+      generated_assets: {
+        ...mkUnit().generated_assets,
+        status: "completed",
+        video_clip: "reference_videos/E1U1.mp4",
+      },
+    });
+    // 不传 projectName → videoUrl 为空，旧逻辑会藏按钮
+    render(<UnitPreviewPanel unit={unit} status="ready" onUpscaleVideo={vi.fn()} />);
+    expect(screen.getByRole("button", { name: /Upscale video|超分视频/ })).toBeInTheDocument();
+  });
+
+  it("hides upscale control when there is no clip", () => {
+    render(<UnitPreviewPanel unit={mkUnit()} projectName="proj" onUpscaleVideo={vi.fn()} />);
+    expect(screen.queryByRole("button", { name: /Upscale video|超分视频/ })).toBeNull();
+  });
+
   it("disables upload button while the unit is generating", () => {
     const { container } = render(
       <UnitPreviewPanel

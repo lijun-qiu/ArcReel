@@ -49,21 +49,26 @@ def test_no_duplicate_ids() -> None:
 
 
 def test_messages_url_https_only() -> None:
+    """公网预设须 https；modelscope 走本机 key 注入代理，允许 loopback http。"""
     for p in list_presets():
+        if p.id == "modelscope":
+            continue
         assert p.messages_url.startswith("https://"), f"{p.id} messages_url not https"
         if p.discovery_url is not None:
             assert p.discovery_url.startswith("https://"), f"{p.id} discovery_url not https"
 
 
 def test_curated_preset_set() -> None:
-    """目录与用户提供的表格保持一致;11 条预设."""
+    """目录与 curated 表格保持一致."""
     expected = {
         "anthropic-official",
         "arcreel",
+        "agnes",
         "glm-cn",
         "glm-intl",
         "xiaomi-mimo",
         "deepseek",
+        "modelscope",
         "minimax-cn",
         "minimax-intl",
         "kimi",
@@ -75,14 +80,16 @@ def test_curated_preset_set() -> None:
 
 
 def test_default_models_match_table() -> None:
-    """用户表格指定的默认模型."""
+    """各预设的默认模型."""
     expected = {
         "anthropic-official": "",
         "arcreel": "gpt-5.5",
+        "agnes": "agnes-3.0-flash",
         "glm-cn": "glm-5.1",
         "glm-intl": "glm-5.1",
         "xiaomi-mimo": "mimo-v2.5-pro",
         "deepseek": "deepseek-v4-pro",
+        "modelscope": "deepseek-ai/DeepSeek-V4-Pro",
         "minimax-cn": "MiniMax-M3",
         "minimax-intl": "MiniMax-M3",
         "kimi": "",
@@ -91,6 +98,19 @@ def test_default_models_match_table() -> None:
     }
     actual = {p.id: p.default_model for p in list_presets()}
     assert actual == expected
+
+
+def test_modelscope_anthropic_endpoint() -> None:
+    from lib.config.registry import MODELSCOPE_LOCAL_PROXY_BASE_URL
+
+    p = get_preset("modelscope")
+    assert p is not None
+    assert p.messages_url == MODELSCOPE_LOCAL_PROXY_BASE_URL
+    assert p.discovery_url == MODELSCOPE_LOCAL_PROXY_BASE_URL
+    assert p.icon_key == "ModelScope"
+    assert p.api_key_pattern is not None
+    assert "modelscope_proxy_api_key" in p.api_key_pattern
+    assert p.api_key_url == "https://modelscope.cn/my/myaccesstoken"
 
 
 def test_api_key_url_required() -> None:

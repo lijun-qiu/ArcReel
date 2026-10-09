@@ -505,6 +505,35 @@ class EnqueuedTask:
     deduped: bool
 
 
+async def resolve_dependency_task_id(
+    *,
+    project_name: str,
+    task_type: str,
+    dependency_resource_id: str | None,
+    script_file: str | None,
+    batch_task_ids: dict[str, str] | None = None,
+) -> str | None:
+    """把 ``dependency_resource_id`` 解析成可等待的 ``dependency_task_id``。
+
+    优先用本批已入队的 task_id；否则查同项目同去重键下仍活动的任务。上一镜已
+    有成图、且当前没有活动任务时返回 ``None``，调用方可立即入队执行。
+    """
+    if not dependency_resource_id:
+        return None
+    if batch_task_ids and dependency_resource_id in batch_task_ids:
+        return batch_task_ids[dependency_resource_id]
+    active = await get_active_tasks_for_resources(
+        project_name=project_name,
+        task_type=task_type,
+        resource_ids=[dependency_resource_id],
+        script_file=script_file,
+    )
+    if not active:
+        return None
+    task_id = active[0].get("task_id")
+    return str(task_id) if task_id else None
+
+
 async def _enqueue_sequentially(
     *,
     project_name: str,
@@ -543,9 +572,13 @@ async def _enqueue_sequentially(
             )
             failed_resource_ids.add(spec.resource_id)
             continue
-        dep_task_id: str | None = None
-        if spec.dependency_resource_id:
-            dep_task_id = task_ids.get(spec.dependency_resource_id)
+        dep_task_id = await resolve_dependency_task_id(
+            project_name=project_name,
+            task_type=spec.task_type,
+            dependency_resource_id=spec.dependency_resource_id,
+            script_file=spec.script_file,
+            batch_task_ids=task_ids,
+        )
 
         try:
             enqueue_result = await enqueue_task_only(
@@ -705,8 +738,10 @@ def batch_enqueue_and_wait_sync(
 
     Phase 1 — Sequential enqueue: iterate *specs* and call
     ``enqueue_task_only`` for each.  If a spec has
-    *dependency_resource_id*, it is automatically resolved to the task_id
-    of a previously enqueued spec with that resource_id.
+    *dependency_resource_id*, it is resolved to a task_id from this batch
+    when present, otherwise from an already-active queue task for that
+    resource (so a follower can wait on a previous shot started outside
+    the batch).
 
     Phase 2 — Parallel wait: all ``wait_for_task`` coroutines run
     concurrently via ``asyncio.gather`` in a **single event loop**, so all

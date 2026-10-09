@@ -16,6 +16,7 @@ import {
   type ResourceKind,
 } from "@/stores/tasks-store";
 import {
+  enqueueAssetSheetsBatch,
   enqueueCharacter,
   enqueueEpisodeNarration,
   enqueueGrid,
@@ -118,17 +119,13 @@ describe("enqueueStoryboard", () => {
     expect(useAppStore.getState().toast).toBeNull();
   });
 
-  it("响应体形状意外时同样回滚，不留下永不清除的在途标记", async () => {
-    // 在途标记不被任何轮询写回清除，故兑现前的异常路径（如 204 让 API.request 返回
-    // undefined、随后取 task_id 抛 TypeError）也必须回滚，否则资源锁死到刷新为止。
-    vi.spyOn(API, "generateStoryboard").mockResolvedValue(
-      undefined as unknown as Awaited<ReturnType<typeof API.generateStoryboard>>,
-    );
+  it("notify:false 时不弹单镜 toast，供批量入口汇总提示", async () => {
+    vi.spyOn(API, "generateStoryboard").mockResolvedValue(SINGLE_OK);
 
-    await expect(enqueueStoryboard("demo", "seg-1", "p", "episode_1.json")).rejects.toThrow();
+    await enqueueStoryboard("demo", "seg-1", "img prompt", "episode_1.json", { notify: false });
 
-    expect(occupied("demo", "storyboard", "seg-1")).toBe(false);
-    expect(markCounts().resource).toBe(0);
+    expect(useAppStore.getState().toast).toBeNull();
+    expect(occupied("demo", "storyboard", "seg-1")).toBe(true);
   });
 });
 
@@ -144,6 +141,20 @@ describe("单资源入队动作的乐观标记 kind / taskType", () => {
     expect(generate).toHaveBeenCalledWith("demo", "seg-1", "p", "episode_1.json", 8, {
       narration_delivery: "use_tts",
       confirmed_request_duration_seconds: 12,
+    });
+  });
+
+  it("video 可将 use_agnes_key_pool 原样交给 API（时间线批量）", async () => {
+    const generate = vi.spyOn(API, "generateVideo").mockResolvedValue(SINGLE_OK);
+
+    await enqueueVideo("demo", "seg-1", "p", "episode_1.json", 4, {
+      narration_delivery: "post_production",
+      use_agnes_key_pool: true,
+    });
+
+    expect(generate).toHaveBeenCalledWith("demo", "seg-1", "p", "episode_1.json", 4, {
+      narration_delivery: "post_production",
+      use_agnes_key_pool: true,
     });
   });
 
@@ -209,6 +220,49 @@ describe("单资源入队动作的乐观标记 kind / taskType", () => {
     await expect(run()).rejects.toThrow("boom");
 
     expect(markCounts()).toEqual({ resource: 0, scriptFile: 0 });
+  });
+});
+
+describe("enqueueAssetSheetsBatch", () => {
+  it("空清单弹 none toast，不调用 API", async () => {
+    const spy = vi.spyOn(API, "generateCharacter");
+    const res = await enqueueAssetSheetsBatch("demo", "character", []);
+    expect(spy).not.toHaveBeenCalled();
+    expect(res).toEqual({ taskIds: [], submitted: 0, skippedBusy: 0 });
+    expect(useAppStore.getState().toast?.text).toBe(i18n.t("dashboard:generate_all_sheets_none"));
+  });
+
+  it("并行入队缺失项并弹汇总 toast", async () => {
+    vi.spyOn(API, "generateCharacter")
+      .mockResolvedValueOnce({ ...SINGLE_OK, task_id: "t-a" })
+      .mockResolvedValueOnce({ ...SINGLE_OK, task_id: "t-b" });
+
+    const res = await enqueueAssetSheetsBatch("demo", "character", [
+      { name: "A", prompt: "pa" },
+      { name: "B", prompt: "pb" },
+    ]);
+
+    expect(res.submitted).toBe(2);
+    expect(res.taskIds).toEqual(["t-a", "t-b"]);
+    expect(occupied("demo", "character", "A")).toBe(true);
+    expect(occupied("demo", "character", "B")).toBe(true);
+    expect(useAppStore.getState().toast?.text).toBe(
+      i18n.t("dashboard:generate_all_sheets_submitted", { count: 2 }),
+    );
+  });
+
+  it("已占用资源跳过", async () => {
+    useTasksStore.getState().beginOptimisticActive("demo", "character", "Busy", "character");
+    const spy = vi.spyOn(API, "generateCharacter").mockResolvedValue({ ...SINGLE_OK, task_id: "t-free" });
+
+    const res = await enqueueAssetSheetsBatch("demo", "character", [
+      { name: "Busy", prompt: "x" },
+      { name: "Free", prompt: "y" },
+    ]);
+
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(spy).toHaveBeenCalledWith("demo", "Free", "y");
+    expect(res).toMatchObject({ submitted: 1, skippedBusy: 1 });
   });
 });
 
@@ -369,6 +423,27 @@ describe("enqueueReferenceVideoBatch", () => {
     enqueue_failures: [],
     deduped: false,
   };
+
+  it("可将 use_agnes_key_pool 原样交给批量 API", async () => {
+    const batch = vi.spyOn(API, "generateReferenceVideoBatch").mockResolvedValue({
+      ...ADMISSION,
+      decision: "admitted",
+      task_ids: ["t1"],
+      task_ids_by_unit: { E1U1: "t1" },
+    } as never);
+
+    await enqueueReferenceVideoBatch("demo", 1, {
+      narration_delivery: "post_production",
+      unit_ids: ["E1U1"],
+      use_agnes_key_pool: true,
+    });
+
+    expect(batch).toHaveBeenCalledWith("demo", 1, {
+      narration_delivery: "post_production",
+      unit_ids: ["E1U1"],
+      use_agnes_key_pool: true,
+    });
+  });
 
   it("admitted 时按目标单元打标并弹入队提示", async () => {
     const batch = vi

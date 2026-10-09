@@ -39,6 +39,7 @@ from server.agent_runtime.sdk_tools.episode_planning import (
     plan_episodes_tool,
     reset_episode_planning_tool,
 )
+from server.agent_runtime.sdk_tools.episode_wardrobe import complete_episode_wardrobe_tool
 from server.agent_runtime.sdk_tools.patch_episode_meta import patch_episode_meta_tool
 from server.agent_runtime.sdk_tools.patch_project import patch_project_tool
 from server.agent_runtime.sdk_tools.patch_script import (
@@ -74,6 +75,7 @@ __all__ = ["build_arcreel_mcp_server", "ToolContext", "ARCREEL_MCP_TOOL_IDS"]
 # i18n fails CI.
 ARCREEL_MCP_TOOL_IDS: tuple[str, ...] = (
     "complete_asset_inventory",
+    "complete_episode_wardrobe",
     "complete_step1_rebuild",
     "get_workflow_plan",
     "list_pending_assets",
@@ -114,6 +116,7 @@ ARCREEL_MCP_TOOL_IDS: tuple[str, ...] = (
 MIGRATION_BLOCKED_TOOL_IDS: frozenset[str] = frozenset(
     {
         "complete_asset_inventory",
+        "complete_episode_wardrobe",
         "complete_step1_rebuild",
         "generate_assets",
         "generate_storyboards",
@@ -163,6 +166,7 @@ def build_arcreel_mcp_server(*, project_name: str, projects_root: Path) -> Any:
     ctx = ToolContext(project_name=project_name, projects_root=projects_root)
     tools = [
         complete_asset_inventory_tool(ctx),
+        complete_episode_wardrobe_tool(ctx),
         complete_step1_rebuild_tool(ctx),
         get_workflow_plan_tool(ctx),
         list_pending_assets_tool(ctx),

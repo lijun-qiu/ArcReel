@@ -478,6 +478,11 @@ class GenerationQueue:
         async with self._task_repo() as repo:
             await repo.persist_provider_job_id(task_id, job_id, endpoint=endpoint, base_url=base_url)
 
+    async def update_running_error_message(self, task_id: str, error_message: str | None) -> int:
+        """running 任务进度提示（排队重试等）；不改 status。"""
+        async with self._task_repo() as repo:
+            return await repo.update_running_error_message(task_id, error_message)
+
     async def persist_api_call_id(self, task_id: str, call_id: int) -> None:
         async with self._task_repo() as repo:
             await repo.persist_api_call_id(task_id, call_id)

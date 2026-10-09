@@ -27,6 +27,7 @@ import type {
   ProjectDeletedPayload,
   GetSystemConfigResponse,
   GetSystemVersionResponse,
+  IndexTtsServiceStatus,
   ModelCandidatesResponse,
   OnboardingStatus,
   SystemConfigPatch,
@@ -853,6 +854,42 @@ class API {
     return this.request("/system/version");
   }
 
+  static async getIndexTtsStatus(): Promise<IndexTtsServiceStatus> {
+    return this.request("/local-services/indextts/status");
+  }
+
+  /** Live Real-ESRGAN host-proxy progress (phase + percent). */
+  static async getRealEsrganProgress(): Promise<{
+    ok: boolean;
+    busy?: boolean;
+    phase?: string;
+    percent?: number;
+    message?: string;
+    frames_total?: number;
+    frames_done?: number;
+    error?: string | null;
+  }> {
+    return this.request("/local-services/realesrgan/progress");
+  }
+
+  /** Ask host supervisor to start the Real-ESRGAN proxy if down. */
+  static async ensureRealEsrgan(): Promise<{
+    ok: boolean;
+    running?: boolean;
+    started?: boolean;
+    error?: string;
+  }> {
+    return this.request("/local-services/realesrgan/ensure", { method: "POST" });
+  }
+
+  static async startIndexTts(): Promise<IndexTtsServiceStatus> {
+    return this.request("/local-services/indextts/start", { method: "POST" });
+  }
+
+  static async unloadIndexTts(): Promise<IndexTtsServiceStatus> {
+    return this.request("/local-services/indextts/unload", { method: "POST" });
+  }
+
   // ==================== 首次使用引导 ====================
 
   static async getOnboardingStatus(
@@ -924,6 +961,30 @@ class API {
     return this.request(`/projects/${encodeURIComponent(name)}`, {
       method: "PATCH",
       body: JSON.stringify(updates),
+    });
+  }
+
+  /** 按源文「第N集/章/回」「场景N」等标题行（# 或 *）规则写入分集账本（不调用文本模型）。 */
+  static async planEpisodesByMarkers(
+    name: string,
+    options: { overwrite?: boolean } = {}
+  ): Promise<{
+    success: boolean;
+    project: ProjectData;
+    episodes: Array<{
+      episode: number;
+      title: string;
+      hook: string;
+      reading_units: number;
+      ledger_status: string;
+    }>;
+    total_planned: number;
+    source_exhausted: boolean;
+    stale_episodes: number[];
+  }> {
+    return this.request(`/projects/${encodeURIComponent(name)}/episodes/plan-by-markers`, {
+      method: "POST",
+      body: JSON.stringify({ overwrite: options.overwrite ?? false }),
     });
   }
 
@@ -1582,6 +1643,18 @@ class API {
     return API.postFileUpload<ShotUploadResult>(url, file);
   }
 
+  /** 对本机 Real-ESRGAN 主机代理超分单元成片。 */
+  static async upscaleReferenceUnitVideo(
+    projectName: string,
+    episode: number,
+    unitId: string
+  ): Promise<ShotUploadResult> {
+    const url =
+      `/projects/${encodeURIComponent(projectName)}/reference-videos/episodes/${episode}` +
+      `/units/${encodeURIComponent(unitId)}/upscale-video`;
+    return this.request(url, { method: "POST", body: "{}" });
+  }
+
   static async listFiles(
     projectName: string
   ): Promise<{
@@ -1969,6 +2042,63 @@ class API {
     );
   }
 
+  /** 生成角色衣橱造型图；resource id 为 ``名__造型``。 */
+  static async generateCharacterLook(
+    projectName: string,
+    charName: string,
+    lookId: string,
+    prompt: string
+  ): Promise<{
+    success: boolean;
+    task_id: string;
+    deduped: boolean;
+    message: string;
+  }> {
+    const resourceId = `${charName}__${lookId}`;
+    return this.generateCharacter(projectName, resourceId, prompt);
+  }
+
+  static async createCharacterLook(
+    projectName: string,
+    charName: string,
+    lookId: string,
+    description: string
+  ): Promise<{ success: boolean; look_id: string; sheet_path: string }> {
+    return this.request(
+      `/projects/${encodeURIComponent(projectName)}/characters/${encodeURIComponent(charName)}/looks`,
+      {
+        method: "POST",
+        body: JSON.stringify({ look_id: lookId, description }),
+      }
+    );
+  }
+
+  static async updateCharacterLook(
+    projectName: string,
+    charName: string,
+    lookId: string,
+    description: string
+  ): Promise<{ success: boolean; look_id: string }> {
+    return this.request(
+      `/projects/${encodeURIComponent(projectName)}/characters/${encodeURIComponent(charName)}/looks/${encodeURIComponent(lookId)}`,
+      {
+        method: "PUT",
+        body: JSON.stringify({ description }),
+      }
+    );
+  }
+
+  static async deleteCharacterLook(
+    projectName: string,
+    charName: string,
+    lookId: string
+  ): Promise<{ success: boolean }> {
+    return this.request(
+      `/projects/${encodeURIComponent(projectName)}/characters/${encodeURIComponent(charName)}/looks/${encodeURIComponent(lookId)}`,
+      { method: "DELETE" }
+    );
+  }
+
   /**
    * 生成场景资产图
    * @param projectName - 项目名称
@@ -2241,6 +2371,31 @@ class API {
       `/projects/${encodeURIComponent(projectName)}/versions/${encodeURIComponent(resourceType)}/${encodeURIComponent(resourceId)}/restore/${version}`,
       {
         method: "POST",
+      }
+    );
+  }
+
+  /**
+   * 删除一条历史版本；分集成片在「唯一当前」时会清空正式文件以便重新生成。
+   */
+  static async deleteVersion(
+    projectName: string,
+    resourceType: string,
+    resourceId: string,
+    version: number
+  ): Promise<
+    SuccessResponse & {
+      deleted_version?: number;
+      current_version?: number;
+      cleared_current?: boolean;
+      file_path?: string;
+      asset_fingerprints?: Record<string, number>;
+    }
+  > {
+    return this.request(
+      `/projects/${encodeURIComponent(projectName)}/versions/${encodeURIComponent(resourceType)}/${encodeURIComponent(resourceId)}/${version}`,
+      {
+        method: "DELETE",
       }
     );
   }
@@ -2542,7 +2697,15 @@ class API {
 
   static async createCredential(
     providerId: string,
-    data: { name: string; api_key?: string; base_url?: string; access_key?: string; secret_key?: string },
+    data: {
+      name: string;
+      api_key?: string;
+      base_url?: string;
+      access_key?: string;
+      secret_key?: string;
+      api_keys_text?: string;
+      modelscope_keys?: Array<{ key: string; label?: string }>;
+    },
   ): Promise<ProviderCredential> {
     return this.request(`/providers/${encodeURIComponent(providerId)}/credentials`, {
       method: "POST",
@@ -2553,7 +2716,15 @@ class API {
   static async updateCredential(
     providerId: string,
     credId: number,
-    data: { name?: string; api_key?: string; base_url?: string; access_key?: string; secret_key?: string },
+    data: {
+      name?: string;
+      api_key?: string;
+      base_url?: string;
+      access_key?: string;
+      secret_key?: string;
+      api_keys_text?: string;
+      modelscope_keys?: Array<{ key: string; label?: string }>;
+    },
   ): Promise<void> {
     return this.request(
       `/providers/${encodeURIComponent(providerId)}/credentials/${credId}`,
@@ -3082,6 +3253,172 @@ class API {
     return this.request(
       `/projects/${encodeURIComponent(projectName)}/reference-videos/episodes/${episode}/units/generate-batch`,
       { method: "POST", body: JSON.stringify(payload) },
+    );
+  }
+
+  /** Hard-cut concat all unit clips into output/episode_N_preview.mp4 (overwrites). */
+  static async composeReferenceEpisodePreview(
+    projectName: string,
+    episode: number,
+  ): Promise<{
+    relative_path: string;
+    url: string;
+    revision?: number | null;
+    subtitles_webvtt: string | null;
+    subtitles: Array<{
+      start_microseconds: number;
+      duration_microseconds: number;
+      text: string;
+      owner?: string;
+      speaker?: string | null;
+    }>;
+    upscaled_exists?: boolean;
+    upscaled_relative_path?: string | null;
+    upscaled_url?: string | null;
+    upscaled_revision?: number | null;
+  }> {
+    return this.request(
+      `/projects/${encodeURIComponent(projectName)}/reference-videos/episodes/${episode}/preview-compose`,
+      { method: "POST" },
+    );
+  }
+
+  /** Upscale composed preview into output/episode_N_preview_upscaled.mp4 (separate file). */
+  static async upscaleReferenceEpisodePreview(
+    projectName: string,
+    episode: number,
+  ): Promise<{
+    relative_path: string;
+    url: string;
+    revision?: number | null;
+    subtitles_webvtt: string | null;
+    subtitles: Array<{
+      start_microseconds: number;
+      duration_microseconds: number;
+      text: string;
+      owner?: string;
+      speaker?: string | null;
+    }>;
+    upscaled_exists?: boolean;
+    upscaled_relative_path?: string | null;
+    upscaled_url?: string | null;
+    upscaled_revision?: number | null;
+  }> {
+    return this.request(
+      `/projects/${encodeURIComponent(projectName)}/reference-videos/episodes/${episode}/upscale-preview`,
+      { method: "POST", body: "{}" },
+    );
+  }
+
+  /** Whether output/episode_N_preview.mp4 already exists. */
+  static async getReferenceEpisodePreview(
+    projectName: string,
+    episode: number,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<{
+    exists: boolean;
+    relative_path: string | null;
+    url: string | null;
+    revision?: number | null;
+    subtitles_webvtt: string | null;
+    subtitles: Array<{
+      start_microseconds: number;
+      duration_microseconds: number;
+      text: string;
+      owner?: string;
+      speaker?: string | null;
+    }>;
+    upscaled_exists?: boolean;
+    upscaled_relative_path?: string | null;
+    upscaled_url?: string | null;
+    upscaled_revision?: number | null;
+  }> {
+    return this.request(
+      `/projects/${encodeURIComponent(projectName)}/reference-videos/episodes/${episode}/preview`,
+      { signal: options.signal },
+    );
+  }
+
+  /** Compose episode preview for storyboard (or any) generation mode. */
+  static async composeEpisodePreview(
+    projectName: string,
+    episode: number,
+  ): Promise<{
+    relative_path: string;
+    url: string;
+    revision?: number | null;
+    subtitles_webvtt: string | null;
+    subtitles: Array<{
+      start_microseconds: number;
+      duration_microseconds: number;
+      text: string;
+      owner?: string;
+      speaker?: string | null;
+    }>;
+    upscaled_exists?: boolean;
+    upscaled_relative_path?: string | null;
+    upscaled_url?: string | null;
+    upscaled_revision?: number | null;
+  }> {
+    return this.request(
+      `/projects/${encodeURIComponent(projectName)}/episodes/${episode}/preview-compose`,
+      { method: "POST" },
+    );
+  }
+
+  /** Upscale composed preview into output/episode_N_preview_upscaled.mp4. */
+  static async upscaleEpisodePreview(
+    projectName: string,
+    episode: number,
+  ): Promise<{
+    relative_path: string;
+    url: string;
+    revision?: number | null;
+    subtitles_webvtt: string | null;
+    subtitles: Array<{
+      start_microseconds: number;
+      duration_microseconds: number;
+      text: string;
+      owner?: string;
+      speaker?: string | null;
+    }>;
+    upscaled_exists?: boolean;
+    upscaled_relative_path?: string | null;
+    upscaled_url?: string | null;
+    upscaled_revision?: number | null;
+  }> {
+    return this.request(
+      `/projects/${encodeURIComponent(projectName)}/episodes/${episode}/upscale-preview`,
+      { method: "POST", body: "{}" },
+    );
+  }
+
+  /** Whether output/episode_N_preview.mp4 already exists (generation-mode agnostic). */
+  static async getEpisodePreview(
+    projectName: string,
+    episode: number,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<{
+    exists: boolean;
+    relative_path: string | null;
+    url: string | null;
+    revision?: number | null;
+    subtitles_webvtt: string | null;
+    subtitles: Array<{
+      start_microseconds: number;
+      duration_microseconds: number;
+      text: string;
+      owner?: string;
+      speaker?: string | null;
+    }>;
+    upscaled_exists?: boolean;
+    upscaled_relative_path?: string | null;
+    upscaled_url?: string | null;
+    upscaled_revision?: number | null;
+  }> {
+    return this.request(
+      `/projects/${encodeURIComponent(projectName)}/episodes/${episode}/preview`,
+      { signal: options.signal },
     );
   }
 

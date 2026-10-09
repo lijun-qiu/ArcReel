@@ -114,6 +114,13 @@ MESSAGES = {
     "video_shorter_than_tts": "Video đã tạo dài {video_duration:.1f}s, ngắn hơn phần thuyết minh {tts_duration:.1f}s; hãy tạo lại mà không cắt hoặc tăng tốc lời nói",
     "audio_provider_not_configured": "Vui lòng cấu hình nhà cung cấp âm thanh trước: thêm nhà cung cấp hỗ trợ chuyển văn bản thành giọng nói trong Cài đặt → Nhà cung cấp",
     "narration_speed_must_be_positive": "Tốc độ thuyết minh phải là số dương",
+    "planning_setting_must_be_positive_integer": "{field} phải là số nguyên dương, đã nhận: {value}",
+    "planning_split_mode_invalid": "planning_split_mode phải là llm hoặc markers, đã nhận: {value}",
+    "ad_no_episode_planning": "Dự án quảng cáo/phim ngắn không hỗ trợ lập kế hoạch tập",
+    "plan_by_markers_needs_overwrite": "Sổ tập đã có dữ liệu; hãy xác nhận ghi đè và thử lại với overwrite=true",
+    "plan_by_markers_reset_confirmation": "Đặt lại trước khi tách theo marker vẫn cần xác nhận các tập đã tiêu thụ: {episodes}",
+    "plan_by_markers_failed": "Tách tập theo marker thất bại",
+    "plan_by_markers_reset_failed": "Đặt lại trước khi tách tập theo marker thất bại",
     "speech_rate_out_of_range": "Nhịp đọc phải nằm trong khoảng {min} đến {max} (ký tự hoặc từ mỗi giây)",
     "character_not_found": "Nhân vật '{name}' không tồn tại",
     "character_task_submitted": "Đã gửi tác vụ tạo hình tài sản nhân vật cho '{name}'",
@@ -169,6 +176,7 @@ MESSAGES = {
     "unknown_provider": "Nhà cung cấp không xác định: {provider_id}",
     "max_workers_must_be_positive_integer": "{field} phải là số nguyên dương, đã nhận: {value}",
     "credentials_not_found": "Không tìm thấy thông tin xác thực",
+    "modelscope_key_not_in_pool": "Khóa ModelScope không nằm trong nhóm khóa hiện tại",
     "vertex_json_read_failed": "Không đọc được tệp đã tải lên",
     "vertex_json_too_large": "Tệp thông tin xác thực quá lớn",
     "vertex_json_invalid": "Tệp thông tin xác thực JSON không hợp lệ",
@@ -281,6 +289,11 @@ MESSAGES = {
     "ref_episode_not_found": "Không tìm thấy tập {episode}",
     "ref_not_reference_video_mode": "Kịch bản của tập này không ở chế độ video tham chiếu",
     "ref_unit_not_found": "Không tìm thấy đơn vị video '{unit_id}'",
+    "ref_unit_no_video": "Đơn vị video '{unit_id}' chưa có clip để siêu phân giải",
+    "ref_unit_video_missing": "Thiếu tệp video của đơn vị '{unit_id}'",
+    "realesrgan_proxy_unreachable": "Không kết nối được proxy Real-ESRGAN trên máy chủ; hãy chạy deploy/start_realesrgan_proxy.cmd -Supervisor",
+    "realesrgan_output_missing": "Siêu phân giải xong nhưng không thấy tệp đầu ra",
+    "episode_preview_not_found": "Tập {episode} chưa có bản xem trước",
     "ref_unit_needs_replan": "Đơn vị video này có vấn đề về người phát ngôn hoặc di chuyển; hãy lập kế hoạch lại trước khi tạo",
     "ref_unit_ids_length_mismatch": "Số lượng unit_ids không khớp với các đơn vị hiện có",
     "ref_duplicate_unit_ids": "unit_ids bị trùng lặp",
@@ -327,6 +340,12 @@ MESSAGES = {
         "Tập này đã tắt âm thanh tham chiếu: không tải lên âm thanh tham chiếu, tính nhất quán giọng nói "
         "không có hiệu lực, lời thoại chỉ dùng làm gợi ý cho prompt; video hoàn chỉnh có tiếng hay không "
         "tùy thuộc vào mô hình đã chọn"
+    ),
+    "ref_warn_offscreen_speech_lip_risk": (
+        "Nhân vật '{speakers}' có lời thoại ngoài khung hoặc độc thoại nội tâm, trong khi nhân vật "
+        "xuất hiện '{faces}' dễ bị gắn khẩu hình sai. Khi tạo sẽ yêu cầu nhân vật xuất hiện nhưng "
+        "không mở miệng phải ngậm miệng (kể cả người độc thoại nội tâm đang trong khung); "
+        "bạn cũng có thể đưa người nói vào khung hình"
     ),
     # Episode meta
     "episode_not_found": "Không tìm thấy tập {episode} hoặc tập chưa có tệp kịch bản",
@@ -389,6 +408,7 @@ MESSAGES = {
     "grid_image_not_ready": "Phân cảnh đa lưới '{grid_id}' chưa có ảnh ghép; hãy tạo hoặc tải lên trước khi tách",
     "grid_generation_in_progress": "Phân cảnh đa lưới '{grid_id}' đang được tạo; vui lòng đợi hoàn tất trước khi thao tác",
     "version_not_found": "Phiên bản {version} không tồn tại",
+    "cannot_delete_current_version": "Không thể xóa phiên bản hiện tại v{version}; hãy chuyển sang phiên bản khác trước",
     "version_resource_not_found": "Tài nguyên '{resource_type}/{resource_id}' không tồn tại",
     "session_busy": "Phiên đang xử lý; vui lòng đợi phản hồi hiện tại hoàn tất trước khi gửi",
     "session_capacity_exceeded": "Đã đạt giới hạn phiên đồng thời, vui lòng thử lại sau",
@@ -402,6 +422,10 @@ MESSAGES = {
     "overview_source_empty": "Thư mục nguồn trống; không thể tạo tổng quan",
     "text_provider_not_configured": "Vui lòng cấu hình nhà cung cấp văn bản trước: thêm ít nhất một nhà cung cấp trong Cài đặt → Nhà cung cấp",
     "jianying_no_completed_segments": "Tập {episode} chưa có đoạn video hoàn thành; hãy tạo video trước",
+    "episode_preview_missing_clips": "Tập {episode} vẫn còn đơn vị chưa có video ({unit_ids}); hãy tạo đủ clip trước khi ghép bản xem trước",
+    "episode_preview_empty": "Tập {episode} không có đơn vị nào để ghép bản xem trước",
+    "episode_preview_ffmpeg_unavailable": "Không thể ghép bản xem trước: máy này chưa có ffmpeg / ffprobe khả dụng",
+    "episode_preview_failed": "Ghép bản xem trước tập thất bại; vui lòng thử lại",
     "presentation_unavailable": "Bản trình bày video đã chọn không khả dụng hoặc lời thuyết minh vượt quá giới hạn phương tiện",
     "project_config_invalid": "Cấu hình dự án không hợp lệ; hãy kiểm tra tham số và thử lại",
     "invalid_discovery_format": "Định dạng khám phá mô hình không được hỗ trợ: {discovery_format}",

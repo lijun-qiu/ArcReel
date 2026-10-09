@@ -1,4 +1,5 @@
 import { render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { API } from "@/api";
 import { DEMO_PROJECT_NAME } from "@/onboarding/demo-project";
@@ -168,6 +169,10 @@ describe("TimelineCanvas", () => {
       expect(shotView).toHaveAttribute("data-can-generate-narration", "no");
       expect(screen.getByTestId("episode-header")).toHaveAttribute("data-can-edit-title", "no");
       expect(screen.queryByRole("button", { name: /生成全集旁白/ })).toBeNull();
+      expect(screen.queryByRole("button", { name: /批量生成分镜图/ })).toBeNull();
+      expect(screen.queryByRole("button", { name: /补全分镜图/ })).toBeNull();
+      expect(screen.queryByRole("button", { name: /批量生成视频/ })).toBeNull();
+      expect(screen.queryByRole("button", { name: /补全视频/ })).toBeNull();
     });
 
     it("keeps the same write handlers outside the demo workbench", () => {
@@ -181,5 +186,35 @@ describe("TimelineCanvas", () => {
       expect(screen.getByTestId("episode-header")).toHaveAttribute("data-can-edit-title", "yes");
       expect(screen.getByRole("button", { name: /生成全集旁白/ })).toBeInTheDocument();
     });
+  });
+
+  it("wires batch and fill storyboard/video buttons", async () => {
+    const user = userEvent.setup();
+    const onBatchStoryboards = vi.fn();
+    const onBatchVideos = vi.fn();
+    render(
+      <TimelineCanvas
+        projectName="demo"
+        episode={1}
+        hasDraft
+        episodeScript={makeScript()}
+        scriptFile="episode_1.json"
+        projectData={makeProjectData()}
+        onBatchStoryboards={onBatchStoryboards}
+        onBatchVideos={onBatchVideos}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "批量生成分镜图" }));
+    expect(onBatchStoryboards).toHaveBeenCalledWith("all", "episode_1.json");
+
+    await user.click(screen.getByRole("button", { name: "补全分镜图" }));
+    expect(onBatchStoryboards).toHaveBeenCalledWith("missing", "episode_1.json");
+
+    await user.click(screen.getByRole("button", { name: "批量生成视频" }));
+    expect(onBatchVideos).toHaveBeenCalledWith("all", "episode_1.json");
+
+    await user.click(screen.getByRole("button", { name: "补全视频" }));
+    expect(onBatchVideos).toHaveBeenCalledWith("missing", "episode_1.json");
   });
 });

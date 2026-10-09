@@ -1,5 +1,5 @@
-import { render, screen } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import { fireEvent, render, screen } from "@testing-library/react";
+import { describe, expect, it, vi } from "vitest";
 import type { EpisodeCost, EpisodeMeta } from "@/types";
 import { EpisodeHeader } from "./EpisodeHeader";
 
@@ -42,5 +42,45 @@ describe("EpisodeHeader", () => {
 
     expect(screen.getByText("$4.00")).toBeInTheDocument();
     expect(screen.getByText("$6.00")).toBeInTheDocument();
+  });
+
+  it("disables compose preview until every shot has a clip", () => {
+    render(
+      <EpisodeHeader
+        ep={EP}
+        segmentCount={2}
+        totalDuration={10}
+        canComposePreview={false}
+        onComposePreview={vi.fn()}
+        onUpscalePreview={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: /合成本集预览/ })).toBeDisabled();
+    // 无 episodePreviewUrl / onWatchPreview 时超分不可用（与参考生视频集头同口径）
+    expect(screen.getByRole("button", { name: /^超分$/ })).toBeDisabled();
+  });
+
+  it("composes the episode preview when all shots are ready", async () => {
+    const onComposePreview = vi.fn().mockResolvedValue({
+      url: "/api/v1/files/proj/output/episode_1_preview.mp4",
+      revision: 1,
+    });
+
+    render(
+      <EpisodeHeader
+        ep={EP}
+        segmentCount={1}
+        totalDuration={5}
+        canComposePreview
+        onComposePreview={onComposePreview}
+        onWatchPreview={vi.fn()}
+        onUpscalePreview={vi.fn()}
+        onWatchUpscaled={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /合成本集预览/ }));
+    expect(onComposePreview).toHaveBeenCalledTimes(1);
   });
 });

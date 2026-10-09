@@ -24,9 +24,12 @@ MESSAGES: dict[str, str] = {
     "template_name_live_wong": "Wong Kar-wai",
     "template_name_live_shaw": "Shaw Brothers",
     "template_name_live_cyberpunk": "Live Cyberpunk",
-    # ===== Anim names (18) =====
+    # ===== Anim names (21) =====
     "template_name_anim_3d_cg": "3D Game CG",
     "template_name_anim_cn_3d": "Chinese 3D",
+    "template_name_anim_cn_short_drama": "Semi-Real 3D Short Drama",
+    "template_name_anim_cn_2d_drama": "CN 2D Short Drama",
+    "template_name_anim_cn_idol_manhua": "CN Manhua Idol",
     "template_name_anim_kyoto": "Kyoto Animation",
     "template_name_anim_arcane": "Arcane (Oil 3D)",
     "template_name_anim_us_3d": "US 3D Animation",
@@ -62,9 +65,12 @@ MESSAGES: dict[str, str] = {
     "template_tagline_live_wong": "Film grain · Eastern city",
     "template_tagline_live_shaw": "HK wuxia · Cinematic",
     "template_tagline_live_cyberpunk": "Cinematic · Ultra HD",
-    # ===== Anim taglines (18) =====
+    # ===== Anim taglines (21) =====
     "template_tagline_anim_3d_cg": "Cinematic · Unreal Engine",
     "template_tagline_anim_cn_3d": "Cinematic · Unreal Engine",
+    "template_tagline_anim_cn_short_drama": "Soft idol · 16:9 drama",
+    "template_tagline_anim_cn_2d_drama": "Bold outline · Flat cel",
+    "template_tagline_anim_cn_idol_manhua": "V-face idol · 2D illustration",
     "template_tagline_anim_kyoto": "Soft cel · Tateishi",
     "template_tagline_anim_arcane": "Arcane · Fortiche",
     "template_tagline_anim_us_3d": "Cinematic · Pixar",

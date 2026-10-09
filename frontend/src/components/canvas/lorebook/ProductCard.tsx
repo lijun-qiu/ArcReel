@@ -199,7 +199,7 @@ export function ProductCard({
       />
 
       {/* ---- Header ---- */}
-      <div className="mb-4 flex items-center gap-2.5">
+      <div className="mb-4 flex items-start gap-2.5">
         <span
           aria-hidden
           className="grid h-7 w-7 shrink-0 place-items-center rounded-md"

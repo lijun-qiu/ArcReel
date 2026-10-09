@@ -46,7 +46,7 @@ export function resolveUnitStatus(
   unit: ReferenceVideoUnit,
   statusMap?: Record<string, UnitStatus>,
 ): UnitStatus {
-  return statusMap?.[unit.unit_id] ?? (unit.generated_assets.video_clip ? "ready" : "pending");
+  return statusMap?.[unit.unit_id] ?? (unit.generated_assets?.video_clip ? "ready" : "pending");
 }
 
 export interface UnitStatusInput {
@@ -85,8 +85,7 @@ export function deriveUnitStatus({
   uploading = false,
   supportsManualUpload = false,
 }: UnitStatusInput): UnitStatus {
-  // 上传中视为 running：批量生成按状态挑 pending 目标，否则上传期间会被再次入队，
-  // 与生成回写同一个成片文件。
+  // 上传中视为 running：否则上传期间批量入口会把该 unit 再次入队，与上传回写同一成片文件。
   if (uploading) return "running";
   if (queueRow && isActiveStatus(queueRow.status)) return "running";
   // 失败任务行 DB 持久化、不会过期，故成片是否压过失败取决于成片能否来自上传。

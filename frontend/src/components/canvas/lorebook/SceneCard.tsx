@@ -1,11 +1,12 @@
 import { useState, useRef, useEffect, useCallback, useId } from "react";
 import { useTranslation } from "react-i18next";
-import { Landmark, Upload } from "lucide-react";
+import { Landmark, Trash2, Upload } from "lucide-react";
 import { API } from "@/api";
 import { AddToLibraryButton } from "@/components/assets/AddToLibraryButton";
 import { ImageEditButton } from "@/components/canvas/timeline/ImageEditButton";
 import { VersionTimeMachine } from "@/components/canvas/timeline/VersionTimeMachine";
 import { AspectFrame } from "@/components/ui/AspectFrame";
+import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { GenerateButton } from "@/components/ui/GenerateButton";
 import { PreviewableImageFrame } from "@/components/ui/PreviewableImageFrame";
 import { useAppStore } from "@/stores/app-store";
@@ -63,6 +64,8 @@ export function SceneCard({
   const [imgError, setImgError] = useState(false);
   const [uploadingSheet, setUploadingSheet] = useState(false);
   const [isEditing, setIsEditing] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const [deleting, setDeleting] = useState(false);
   const sheetInputRef = useRef<HTMLInputElement>(null);
 
   const handleSheetUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -115,6 +118,22 @@ export function SceneCard({
     onUpdate(name, { description });
   };
 
+  const handleDelete = async () => {
+    if (deleting) return;
+    if (rejectIfAssetBusy("scene", projectName, name, t, "assets:delete_busy_hint")) return;
+    setDeleting(true);
+    try {
+      await API.deleteProjectScene(projectName, name);
+      setConfirmDelete(false);
+      useAppStore.getState().pushToast(t("assets:delete_success", { name }), "success");
+      await onReload?.();
+    } catch (err) {
+      useAppStore.getState().pushToast(errMsg(err), "error");
+    } finally {
+      setDeleting(false);
+    }
+  };
+
   const sheetUrl = scene.scene_sheet
     ? API.getFileUrl(projectName, scene.scene_sheet, sheetFp)
     : null;
@@ -150,7 +169,7 @@ export function SceneCard({
       />
 
       {/* ---- Header: 单排 icon + name + icon-only 工具栏 ---- */}
-      <div className="mb-4 flex items-center gap-2.5">
+      <div className="mb-4 flex items-start gap-2.5">
         <span
           aria-hidden
           className="grid h-7 w-7 shrink-0 place-items-center rounded-md"
@@ -167,14 +186,14 @@ export function SceneCard({
           name={name}
           assetType="scene"
           readOnly={readOnly}
-          busy={generating || uploadingSheet}
+          busy={generating || uploadingSheet || deleting}
         />
         {readOnly ? null : (
         <div className="flex shrink-0 items-center gap-0.5">
           <button
             type="button"
             onClick={() => sheetInputRef.current?.click()}
-            disabled={uploadingSheet || generating}
+            disabled={uploadingSheet || generating || deleting}
             title={t("assets:upload_sheet")}
             aria-label={t("assets:upload_sheet")}
             className="focus-ring inline-flex h-7 w-7 items-center justify-center rounded-md transition-colors hover:bg-[oklch(1_0_0_/_0.05)] disabled:cursor-not-allowed disabled:opacity-40"
@@ -195,7 +214,7 @@ export function SceneCard({
             resourceType="scene"
             resourceId={name}
             hasImage={Boolean(scene.scene_sheet)}
-            busy={generating || uploadingSheet}
+            busy={generating || uploadingSheet || deleting}
           />
           <AddToLibraryButton
             resourceType="scene"
@@ -203,7 +222,7 @@ export function SceneCard({
             projectName={projectName}
             initialDescription={scene.description}
             sheetPath={scene.scene_sheet}
-            busy={generating || uploadingSheet}
+            busy={generating || uploadingSheet || deleting}
             className="focus-ring inline-flex h-7 w-7 items-center justify-center rounded-md text-[var(--color-text-3)] transition-colors hover:bg-[oklch(1_0_0_/_0.05)] disabled:cursor-not-allowed disabled:opacity-40"
           />
           <VersionTimeMachine
@@ -212,8 +231,19 @@ export function SceneCard({
             resourceId={name}
             onRestore={onRestoreVersion}
             iconOnly
-            busy={generating || uploadingSheet}
+            busy={generating || uploadingSheet || deleting}
           />
+          <button
+            type="button"
+            onClick={() => setConfirmDelete(true)}
+            disabled={uploadingSheet || generating || deleting}
+            title={t("assets:delete")}
+            aria-label={t("assets:delete")}
+            className="focus-ring inline-flex h-7 w-7 items-center justify-center rounded-md transition-colors hover:bg-[oklch(1_0_0_/_0.05)] hover:text-[var(--color-warm-bright)] disabled:cursor-not-allowed disabled:opacity-40"
+            style={{ color: "var(--color-text-3)" }}
+          >
+            <Trash2 className="h-3.5 w-3.5" />
+          </button>
         </div>
         )}
       </div>
@@ -291,6 +321,21 @@ export function SceneCard({
           className="w-full justify-center"
         />
       )}
+
+      <ConfirmDialog
+        open={confirmDelete}
+        tone="danger"
+        title={t("assets:delete_confirm", { type: t("assets:type.scene") })}
+        description={<span className="font-mono">「{name}」</span>}
+        confirmLabel={t("assets:delete")}
+        loadingLabel={t("assets:loading")}
+        cancelLabel={t("assets:cancel")}
+        loading={deleting}
+        onConfirm={() => void handleDelete()}
+        onCancel={() => {
+          if (!deleting) setConfirmDelete(false);
+        }}
+      />
     </div>
   );
 }

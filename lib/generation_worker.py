@@ -455,6 +455,13 @@ class GenerationWorker:
         # reload 只换它的数字；后者承载 inflight/pending，占用容器引用恒定不被重建。
         self._capacity: CapacityTable = capacity or CapacityTable.from_env()
         self._slots: SlotTable = slots or SlotTable()
+        # Agnes 批量视频「一 key 一路」租约台账；用完在 drain 时回收。
+        from lib.agnes_video_key_lease import AgnesVideoKeyLeaseTable
+
+        self._agnes_key_leases = AgnesVideoKeyLeaseTable()
+        # 最近一次读到的 Agnes key 池大小；供 pool_full SQL 黑名单放大 cap，
+        # Agnes 视频凭证池大小缓存：非空即走 key 租约（见 ``_task_wants_agnes_key_pool``）。
+        self._agnes_key_pool_size: int = 0
         logger.info("Worker 初始容量表: %s", self._capacity._limits)
         self.lease_ttl = max(1.0, float(TASK_WORKER_LEASE_TTL_SEC))
         self.heartbeat_interval = max(0.5, float(TASK_WORKER_HEARTBEAT_SEC))
@@ -580,11 +587,65 @@ class GenerationWorker:
         会把"不支持该 lane 的 provider"也归入黑名单，让 SQL 把这些 task 静默 drop，
         而不是走 worker 二次校验的 ``cap == 0`` fail-fast mark_failed 路径。
         """
-        return frozenset(
-            pid
-            for pid in self._slots.occupied_providers(media_type)
-            if (cap := self._capacity.get(pid, media_type)) > 0 and not self._slots.has_room(pid, media_type, cap)
-        )
+        from lib.providers import PROVIDER_AGNES
+
+        full: set[str] = set()
+        for pid in self._slots.occupied_providers(media_type):
+            cap = self._capacity.get(pid, media_type)
+            if pid == PROVIDER_AGNES and media_type == "video" and self._agnes_key_pool_size > 0:
+                cap = max(cap, self._agnes_key_pool_size)
+            if cap > 0 and not self._slots.has_room(pid, media_type, cap):
+                full.add(pid)
+        return frozenset(full)
+
+    async def _load_agnes_video_key_pool(self) -> list[str]:
+        """读 Agnes 激活凭证的 key 池；失败时返回空列表（调用方按池满回队）。"""
+        from lib.agnes_video_key_lease import parse_agnes_api_key_pool
+        from lib.db import safe_session_factory
+        from lib.db.repositories.credential_repository import CredentialRepository
+        from lib.providers import PROVIDER_AGNES
+
+        try:
+            async with safe_session_factory() as session:
+                cred = await CredentialRepository(session).get_active(PROVIDER_AGNES)
+            if cred is None:
+                self._agnes_key_pool_size = 0
+                return []
+            keys = parse_agnes_api_key_pool(api_key=cred.api_key, api_keys_json=cred.api_keys)
+            self._agnes_key_pool_size = len(keys)
+            return keys
+        except Exception:
+            logger.warning("加载 Agnes key 池失败", exc_info=True)
+            return []
+
+    def _task_eligible_for_agnes_key_lease(self, task: dict[str, Any], *, provider_id: str, media_type: str) -> bool:
+        """Agnes 视频任务是否可能走 key 租约（仍须结合池大小判定）。"""
+        from lib.providers import PROVIDER_AGNES
+
+        if provider_id != PROVIDER_AGNES or media_type != "video":
+            return False
+        return task.get("task_type") in ("video", "reference_video")
+
+    def _task_wants_agnes_key_pool(
+        self,
+        task: dict[str, Any],
+        *,
+        provider_id: str,
+        media_type: str,
+        key_pool: list[str] | None = None,
+    ) -> bool:
+        """是否对本任务启用「一 key 一路」租约。
+
+        Agnes 视频（含 reference_video）在凭证池非空时一律租约：单 key 并发=1，
+        多 key 按池大小并行。手动批量 ``use_agnes_key_pool`` 仍可显式传入，与自动
+        租约语义一致（冗余标记，不删 API）。
+        """
+        if not self._task_eligible_for_agnes_key_lease(task, provider_id=provider_id, media_type=media_type):
+            return False
+        pool = key_pool
+        if pool is None:
+            return self._agnes_key_pool_size >= 1
+        return len(pool) >= 1
 
     async def _claim_tasks(self) -> bool:
         """Claim tasks from queue and route to per-provider slots.
@@ -595,6 +656,8 @@ class GenerationWorker:
         worker 二次 ``_extract_provider`` 派生 provider 再校验容量。
         """
         claimed_any = False
+        # 刷新 Agnes 池大小缓存：pool_full 与租约判定都依赖它。
+        await self._load_agnes_video_key_pool()
 
         for media_type in ("image", "video", "audio"):
             attempted_current_state_tasks: set[str] = set()
@@ -617,9 +680,43 @@ class GenerationWorker:
 
                 provider_id = await _extract_provider(task)
                 cap = self._capacity.get(provider_id, media_type)
+                leased_key: str | None = None
+                key_pool: list[str] | None = None
+                if self._task_eligible_for_agnes_key_lease(task, provider_id=provider_id, media_type=media_type):
+                    key_pool = await self._load_agnes_video_key_pool()
+                wants_key_pool = self._task_wants_agnes_key_pool(
+                    task,
+                    provider_id=provider_id,
+                    media_type=media_type,
+                    key_pool=key_pool,
+                )
+                if wants_key_pool:
+                    pool = key_pool or []
+                    # 租约路径：并发上限至少盖住 key 数（与 CapacityTable 取较大者）
+                    cap = max(cap, len(pool))
+                    leased_key = self._agnes_key_leases.try_acquire(task["task_id"], pool)
+                    if leased_key is None:
+                        logger.info(
+                            "Agnes key 池已满，task %s 回队等待下一 cycle",
+                            task["task_id"],
+                        )
+                        try:
+                            await self.queue.persist_execution_provider_id(task["task_id"], provider_id)
+                        except Exception:
+                            logger.warning(
+                                "回队前投影刷新失败 task_id=%s provider=%s",
+                                task["task_id"],
+                                provider_id,
+                                exc_info=True,
+                            )
+                        await self._requeue_single_task(task["task_id"])
+                        attempted_current_state_tasks.add(task["task_id"])
+                        continue
 
                 if cap <= 0:
                     # 供应商不支持此媒体类型（容量 ≤ 0），直接失败（与 has_room 守卫一致）
+                    if leased_key is not None:
+                        self._agnes_key_leases.release(task["task_id"])
                     logger.warning(
                         "供应商 %s 不支持 %s 生成，任务 %s 标记失败",
                         provider_id,
@@ -638,6 +735,8 @@ class GenerationWorker:
                     continue
 
                 if not self._slots.has_room(provider_id, media_type, cap):
+                    if leased_key is not None:
+                        self._agnes_key_leases.release(task["task_id"])
                     # NULL 老数据 / 未知 provider 通过 SQL 兜底走到这里：二次校验仍满
                     # → 回队让下次 cycle 再试（FIFO 顺序由 queued_at 维持）。绝不能
                     # mark_failed：入队后 provider_id 才被派生，资料完整的任务也可能
@@ -672,7 +771,11 @@ class GenerationWorker:
                 # Dispatch：登记占用（INFLIGHT），bucket 由 register 自动创建
                 claimed_any = True
                 if task.get("task_type") in ("video", "reference_video"):
-                    process_task = self._process_task(task, claimed_provider_id=provider_id)
+                    process_task = self._process_task(
+                        task,
+                        claimed_provider_id=provider_id,
+                        agnes_leased_api_key=leased_key,
+                    )
                 else:
                     process_task = self._process_task(task)
                 self._slots.register(
@@ -734,6 +837,7 @@ class GenerationWorker:
         for task_id, finished_task in self._slots.drain_finished():
             # 同步判定取消/异常：drain_finished() 只返回 done() 的 task，无需 await。
             # 不 await 就没有挂起点，自然不会误吞针对 _run_loop 自身的取消信号。
+            self._agnes_key_leases.release(task_id)
             if finished_task.cancelled():
                 # 子任务被取消。正常路径 _process_task 已 mark_cancelled 并 re-raise；
                 # 但取消可能落在 _process_task 进入 try 之前（协程尚未开始执行，或仍停在
@@ -765,13 +869,21 @@ class GenerationWorker:
         await asyncio.gather(*active_tasks, return_exceptions=True)
         self._slots.clear()
 
-    async def _process_task(self, task: dict[str, Any], *, claimed_provider_id: str | None = None) -> None:
+    async def _process_task(
+        self,
+        task: dict[str, Any],
+        *,
+        claimed_provider_id: str | None = None,
+        agnes_leased_api_key: str | None = None,
+    ) -> None:
         """Run a generation task with 0-rows-cancelled finally protocol (ADR 0006).
 
         所有 DB 写入（mark_succeeded / mark_failed / mark_cancelled）都用 ``asyncio.shield``
         包裹：若取消信号在 DB 写入 await 期间到达，inner shield 让 UPDATE 跑完再向外
         传播，避免任务停在 cancelling/running 中间态。
         """
+        from lib.agnes_video_key_lease import reset_leased_api_key, set_leased_api_key
+
         task_id = task["task_id"]
         task_type = task.get("task_type", "unknown")
         provider_id = claimed_provider_id or await _extract_provider(task)
@@ -779,6 +891,7 @@ class GenerationWorker:
 
         from server.services.generation_tasks import execute_generation_task
 
+        lease_token = set_leased_api_key(agnes_leased_api_key) if agnes_leased_api_key else None
         try:
             if task_type in ("video", "reference_video"):
                 result = await execute_generation_task(task, claimed_provider_id=provider_id)
@@ -792,6 +905,7 @@ class GenerationWorker:
             # 视频任务在执行入口重新读取当前状态；若 provider 已从认领时的槽漂移，
             # 不得占着旧槽提交到新 provider。刷新 advisory 列并回队，让下一 cycle 在新槽
             # 完成容量校验后再执行。此处尚未调用 provider，不会造成重复扣费。
+            self._agnes_key_leases.release(task_id)
             try:
                 await asyncio.shield(self.queue.persist_execution_provider_id(task_id, exc.actual_provider_id))
             except Exception:
@@ -836,6 +950,9 @@ class GenerationWorker:
                 # 外部已抢先翻 cancelling → 落地 cancelled 终态
                 await asyncio.shield(self.queue.mark_task_cancelled(task_id, cancelled_by="user"))
             return
+        finally:
+            if lease_token is not None:
+                reset_leased_api_key(lease_token)
 
         try:
             rows = await asyncio.shield(self.queue.mark_task_succeeded(task_id, result))

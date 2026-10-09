@@ -75,11 +75,18 @@ async def test_list_preset_providers_returns_catalog(authed_client) -> None:
     ids = [p["id"] for p in data["providers"]]
     assert "deepseek" in ids
     assert "anthropic-official" in ids
+    assert "modelscope" in ids
     deepseek = next(p for p in data["providers"] if p["id"] == "deepseek")
     assert deepseek["messages_url"] == "https://api.deepseek.com/anthropic"
     assert deepseek["discovery_url"] == "https://api.deepseek.com"
     assert deepseek["default_model"] == "deepseek-v4-pro"
     assert deepseek["icon_key"] == "DeepSeek"
+    modelscope = next(p for p in data["providers"] if p["id"] == "modelscope")
+    from lib.config.registry import MODELSCOPE_LOCAL_PROXY_BASE_URL
+
+    assert modelscope["messages_url"] == MODELSCOPE_LOCAL_PROXY_BASE_URL
+    assert modelscope["default_model"] == "deepseek-ai/DeepSeek-V4-Pro"
+    assert modelscope["icon_key"] == "ModelScope"
     arcreel = next(p for p in data["providers"] if p["id"] == "arcreel")
     assert arcreel["is_recommended"] is True
     assert arcreel["api_key_url"] == "https://api.arc-reel.com/"
@@ -126,7 +133,7 @@ async def test_create_multiline_keys_enables_rotation(authed_client) -> None:
         "display_name": "Agnes pool",
         "base_url": "https://apihub.agnes-ai.com",
         "api_key": "sk-one\nsk-two\nsk-three",
-        "model": "agnes-2.5-flash",
+        "model": "agnes-3.0-flash",
     }
     resp = await authed_client.post("/api/v1/agent/credentials", json=body)
     assert resp.status_code == 201

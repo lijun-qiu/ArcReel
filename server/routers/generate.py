@@ -52,6 +52,8 @@ from lib.speech_composition import SpeechMode, admit_script_unit
 from lib.storyboard_sequence import (
     EndFrameImageUnavailable,
     StoryboardImageUnavailable,
+    StoryboardTaskPlan,
+    build_storyboard_dependency_plan,
     find_storyboard_item,
     get_storyboard_items,
 )
@@ -103,6 +105,8 @@ class GenerateVideoRequest(BaseModel):
     # 时长基准的批量入口与由模型推断参数的智能体视频工具上。
     narration_delivery: NarrationDelivery = POST_PRODUCTION
     confirmed_request_duration_seconds: int | None = Field(default=None, gt=0)
+    # 时间线手动批量可显式传 true；凭证已是多 key 时 worker 即使用不传也会租约轮换。
+    use_agnes_key_pool: bool = False
 
 
 class GenerateTtsRequest(BaseModel):
@@ -192,7 +196,7 @@ async def generate_storyboard(
     生成由 GenerationWorker 异步执行，状态通过 SSE 推送。
     """
 
-    def _sync():
+    def _sync() -> StoryboardTaskPlan | None:
         pm_local = get_project_manager()
         project = pm_local.load_project(project_name)
         script = pm_local.load_script(project_name, req.script_file)
@@ -201,8 +205,15 @@ async def generate_storyboard(
         resolved = find_storyboard_item(items, id_field, segment_id)
         if resolved is None:
             raise NotFoundError("segment_not_found", id=segment_id)
+        plans = build_storyboard_dependency_plan(
+            items,
+            id_field,
+            [segment_id],
+            req.script_file,
+        )
+        return plans[0] if plans else None
 
-    await asyncio.to_thread(_sync)
+    plan = await asyncio.to_thread(_sync)
 
     # 结构校验 + 构造经单一守卫点（与 SDK 入队同源，规则不分叉）；
     # 校验失败抛 TaskSpecValidationError，由 app 级 handler 映射为 400
@@ -212,10 +223,26 @@ async def generate_storyboard(
         resource_id=segment_id,
         prompt=req.prompt,
         script_file=req.script_file,
+        dependency_resource_id=plan.dependency_resource_id if plan else None,
+        dependency_group=plan.dependency_group if plan else None,
+        dependency_index=plan.dependency_index if plan else None,
     )
 
-    # 入队
+    # 上一镜若已在队列中（用户连点多镜 / 工作流批量），挂 dependency 串行等它完成
     queue = get_generation_queue()
+    dep_task_id = None
+    if spec.dependency_resource_id:
+        active = await queue.get_active_tasks_for_resources(
+            project_name=project_name,
+            task_type=spec.task_type,
+            resource_ids=[spec.dependency_resource_id],
+            script_file=spec.script_file,
+        )
+        if active:
+            raw_id = active[0].get("task_id")
+            dep_task_id = str(raw_id) if raw_id else None
+
+    # 入队
     result = await queue.enqueue_task(
         project_name=project_name,
         task_type=spec.task_type,
@@ -224,6 +251,9 @@ async def generate_storyboard(
         script_file=spec.script_file,
         payload=spec.payload,
         source="webui",
+        dependency_task_id=dep_task_id,
+        dependency_group=spec.dependency_group,
+        dependency_index=spec.dependency_index,
         user_id=user.id,
     )
 
@@ -360,6 +390,8 @@ async def generate_video(
     }
     if req.narration_delivery != USE_TTS:
         extra_payload["duration_seconds"] = req.duration_seconds
+    if req.use_agnes_key_pool:
+        extra_payload["use_agnes_key_pool"] = True
     spec = TaskSpec.from_request(
         task_type="video",
         media_type="video",
@@ -783,6 +815,23 @@ async def _enqueue_asset_generation(
         project = get_project_manager().load_project(project_name)
         # 存量 key 可能是 NFD，按坐标系解析存在性并取真实落盘 key；
         # 非 dict / 显式 null 的畸形桶由 resolve_asset_key 按空桶处理
+        if asset_type == "character":
+            from lib.character_looks import (
+                LOOK_FILE_SEP,
+                look_asset_id,
+                look_is_registered,
+                parse_look_asset_id,
+            )
+
+            if LOOK_FILE_SEP in resource_name:
+                char_name, look = parse_look_asset_id(resource_name)
+                resolved = resolve_asset_key(project.get(spec.bucket_key), char_name)
+                if resolved is None:
+                    raise NotFoundError(keys["not_found"], name=char_name)
+                entry = project[spec.bucket_key][resolved]
+                if not isinstance(entry, dict) or not look_is_registered(entry, look):
+                    raise NotFoundError(keys["not_found"], name=resource_name)
+                return look_asset_id(resolved, look)
         resolved = resolve_asset_key(project.get(spec.bucket_key), resource_name)
         if resolved is None:
             raise NotFoundError(keys["not_found"], name=resource_name)

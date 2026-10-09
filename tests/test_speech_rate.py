@@ -50,6 +50,12 @@ class TestEstimateSpokenSeconds:
         expected = 5 / speech_rate_units_per_second("zh")
         assert estimate_spoken_seconds("一二三四五", "zh") == pytest.approx(expected)
 
+    def test_zh_punctuation_does_not_inflate_duration(self):
+        # 口播「字 / 秒」不计逗号、句号等；与纯汉字同长。
+        plain = estimate_spoken_seconds("小雨晚上别做饭了", "zh")
+        with_punct = estimate_spoken_seconds("小雨，晚上别做饭了。", "zh")
+        assert with_punct == pytest.approx(plain)
+
     def test_longer_text_takes_longer(self):
         short = estimate_spoken_seconds("一二", "zh")
         longer = estimate_spoken_seconds("一二三四五六七八", "zh")

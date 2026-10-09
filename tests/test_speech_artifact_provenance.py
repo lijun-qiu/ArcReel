@@ -21,6 +21,7 @@ from lib.speech_artifact_provenance import (
     build_presentation_basis,
     build_video_duration_basis,
     build_video_speech_basis,
+    resolve_presentation_track_gains,
 )
 from lib.speech_composition import SpeechFieldLocation, SpeechMode, SpeechOwner, SpeechPreparation, SpeechUtterance
 
@@ -343,4 +344,26 @@ def test_use_tts_subtitle_and_presentation_require_narration_audio() -> None:
             variant=USE_TTS,
             video=video,
             subtitle=_basis("test/subtitle", "v1"),
+        )
+
+
+def test_default_mix_policy_mutes_provider_under_tts_and_keeps_full_gain_without_it() -> None:
+    assert resolve_presentation_track_gains(provider_audio_enabled=True, has_narration_audio=False) == (1.0, None)
+    # 叠 TTS 时静音供应商原声，避免旁白镜自带口播与 IndexTTS 叠成两重声。
+    assert resolve_presentation_track_gains(provider_audio_enabled=True, has_narration_audio=True) == (0.0, 0.7)
+    assert resolve_presentation_track_gains(provider_audio_enabled=False, has_narration_audio=True) == (0.0, 0.7)
+    assert resolve_presentation_track_gains(provider_audio_enabled=False, has_narration_audio=False) == (0.0, None)
+
+
+@pytest.mark.parametrize("invalid", [-0.1, 1.1, True, "0.5", None])
+def test_mix_policy_gains_must_be_finite_unit_interval(invalid: object) -> None:
+    with pytest.raises(ValueError, match="mix_policy.narration_audio_gain"):
+        resolve_presentation_track_gains(
+            provider_audio_enabled=True,
+            has_narration_audio=True,
+            mix_policy={
+                "provider_video_gain": 1.0,
+                "provider_video_gain_under_tts": 0.3,
+                "narration_audio_gain": invalid,
+            },
         )

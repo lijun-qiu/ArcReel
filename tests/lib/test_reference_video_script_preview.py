@@ -7,6 +7,7 @@ import pytest
 from lib.i18n import MESSAGES, _
 from lib.reference_video.script_preview import (
     WARN_BRACES_NOT_SPEECH,
+    WARN_OFFSCREEN_SPEECH_LIP_RISK,
     WARN_REFERENCE_AUDIO_OVERFLOW,
     WARN_SILENT_EPISODE,
     WARN_SILENT_MODEL,
@@ -17,6 +18,7 @@ from lib.reference_video.script_preview import (
     WARN_UNREGISTERED_MENTION,
     WARN_UNREGISTERED_SPEAKER,
     build_script_preview,
+    derive_offscreen_speech_lip_guard,
     derive_utterances,
     derive_voice_bindings,
 )
@@ -97,8 +99,8 @@ def test_blank_speaker_degrades_to_warning_instead_of_raising():
     """speaker 位空白不得构造非法 Utterance——只读派生要出 warning，不能抛校验错。"""
     preview = build_script_preview("中景。\n@[ ]：{我来了}", PROJECT, _SOFT)
     assert preview.utterances == []
-    # 未成记号 → 花括号未识别 warning；空白名同时作为未登记 mention 被点名。
-    assert keys(preview) == [WARN_UNREGISTERED_MENTION, WARN_BRACES_NOT_SPEECH]
+    # 未成记号 → 花括号未识别 warning；空白名不进 mention 列表，不再叠报未登记。
+    assert keys(preview) == [WARN_BRACES_NOT_SPEECH]
 
 
 def test_voiceover_mark_is_bare_braces_anywhere():
@@ -415,6 +417,81 @@ def test_silent_episode_keeps_utterances_for_lip_sync():
     assert [u.text for u in preview.utterances] == ["我来了"]
 
 
+def test_warn_offscreen_speech_lip_risk_when_speaker_absent_from_shot():
+    """说话人只在台词位、画面另有出镜角色 → 口型错绑风险 warning。"""
+    text = "@[张三] 被按在地上。@[李四]{你以为你很能打？}"
+    preview = build_script_preview(text, PROJECT, _SOFT)
+    assert {
+        "key": WARN_OFFSCREEN_SPEECH_LIP_RISK,
+        "params": {"speakers": "李四", "faces": "张三"},
+    } in preview.warnings
+
+
+def test_no_offscreen_speech_lip_risk_when_speaker_is_on_screen():
+    text = "@[张三] 推门。@[张三]{我来了}"
+    preview = build_script_preview(text, PROJECT, _SOFT)
+    assert WARN_OFFSCREEN_SPEECH_LIP_RISK not in keys(preview)
+
+
+def test_no_offscreen_speech_lip_risk_when_no_on_screen_character():
+    """纯画外台词、画面无角色 mention：没有可错绑的出镜脸，不告警。"""
+    preview = build_script_preview("@[张三]{我来了}", PROJECT, _SOFT)
+    assert WARN_OFFSCREEN_SPEECH_LIP_RISK not in keys(preview)
+
+
+def test_offscreen_speech_lip_guard_mutes_silent_on_screen_only():
+    """出镜且本身有台词的角色不进 mute；仅闭嘴未说话的出镜人。"""
+    text = "@[张三] 与 @[李四] 对峙。@[旁白者]{住手。}@[张三]{让开。}"
+    utterances, _ = derive_utterances(text)
+    guard = derive_offscreen_speech_lip_guard(text, utterances, PROJECT)
+    assert guard.apply is True
+    assert guard.mute_names == ["李四"]
+    assert guard.warnings[0]["params"]["speakers"] == "旁白者"
+    assert guard.warnings[0]["params"]["faces"] == "张三、李四"
+
+
+def test_inner_monologue_derives_utterance_kind_and_mutes_on_screen_speaker():
+    """出镜角色写内心独白：utterance kind=inner_monologue，说话人进 mute（心声不出口型）。"""
+    text = "@[张三] 站在窗前。@[张三%内心独白]{他不会回来了。}"
+    utterances, _ = derive_utterances(text)
+    assert [(u.kind, u.speaker, u.text) for u in utterances] == [
+        ("inner_monologue", "张三", "他不会回来了。")
+    ]
+    guard = derive_offscreen_speech_lip_guard(text, utterances, PROJECT)
+    assert guard.apply is True
+    assert guard.mute_names == ["张三"]
+    assert guard.warnings[0]["params"]["speakers"] == "张三"
+
+    preview = build_script_preview(text, PROJECT, _SOFT)
+    assert {
+        "key": WARN_OFFSCREEN_SPEECH_LIP_RISK,
+        "params": {"speakers": "张三", "faces": "张三"},
+    } in preview.warnings
+
+
+def test_mixed_monologue_and_dialogue_does_not_whole_unit_mute_speaker():
+    """同段既有心声又有对白：第三段 mute 不含该说话人（对白口型要放开）。"""
+    text = "@[张三] 敲键盘。@[张三%内心独白]{太肉了。}@[张三]{洗碗机。}"
+    utterances, _ = derive_utterances(text)
+    guard = derive_offscreen_speech_lip_guard(text, utterances, PROJECT)
+    assert guard.apply is True
+    assert guard.mute_names == []
+    assert guard.warnings[0]["params"]["speakers"] == "张三"
+
+
+def test_inner_monologue_binds_voice_like_dialogue():
+    """内心独白仍进声音绑定（挂角色音色），与旁白裸 {} 不同。"""
+    text = "@[张三%内心独白]{心声}"
+    utterances, _ = derive_utterances(text)
+    bindings = derive_voice_bindings(
+        utterances,
+        PROJECT["characters"],
+        VoiceRenderSettings(voice_consistency="native", max_reference_audio=3, audio_ready={"张三"}),
+    )
+    assert bindings.speakers == ["张三"]
+    assert bindings.audio_speakers == ["张三"]
+
+
 # ---------- i18n ----------
 
 WARNING_KEYS = [
@@ -427,6 +504,7 @@ WARNING_KEYS = [
     WARN_SILENT_MODEL,
     WARN_SILENT_EPISODE,
     WARN_SPEAKER_AUDIO_NEEDS_IMAGE,
+    WARN_OFFSCREEN_SPEECH_LIP_RISK,
 ]
 
 WARNING_PARAMS = {
@@ -439,6 +517,7 @@ WARNING_PARAMS = {
     WARN_SILENT_MODEL: {"model": "minimax-01"},
     WARN_SILENT_EPISODE: {},
     WARN_SPEAKER_AUDIO_NEEDS_IMAGE: {"name": "李四"},
+    WARN_OFFSCREEN_SPEECH_LIP_RISK: {"speakers": "李四", "faces": "张三"},
 }
 
 

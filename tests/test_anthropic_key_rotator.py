@@ -106,6 +106,72 @@ async def test_rotator_passthrough_sse_bytes() -> None:
 
 
 @pytest.mark.asyncio
+async def test_modelscope_proxy_strips_v1_prefix_and_uses_agent_pool_key() -> None:
+    """魔搭本机注入代理：用 Agent 池 Key，并剥掉 Anthropic SDK 的 /v1 前缀避免双写。"""
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+
+    async with factory() as session:
+        session.add(
+            AgentAnthropicCredential(
+                user_id="default",
+                preset_id="modelscope",
+                display_name="ModelScope",
+                base_url="http://127.0.0.1:10001",
+                api_key="modelscope_proxy_api_key",
+                api_keys=json.dumps(
+                    [
+                        {"key": "modelscope_proxy_api_key"},
+                        {"key": "modelscope_proxy_api_key_b"},
+                    ]
+                ),
+                model="deepseek-ai/DeepSeek-V4-Pro",
+                is_active=True,
+            )
+        )
+        await session.commit()
+
+    rotator = AnthropicKeyRotator()
+    rotator.bind_session_factory(factory)
+    await rotator.start()
+
+    captured: dict[str, Any] = {}
+
+    def fake_stream(method, url, headers=None, content=None, params=None):  # noqa: ARG001
+        captured["url"] = url
+        captured["x_api_key"] = (headers or {}).get("x-api-key")
+        return _FakeStreamCM(
+            _FakeStreamResponse(
+                status_code=200,
+                headers={"content-type": "text/event-stream"},
+                chunks=[b"data: [DONE]\n\n"],
+            )
+        )
+
+    assert rotator._http is not None
+    rotator._http.stream = fake_stream  # type: ignore[method-assign]
+
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(
+                f"{rotator.base_url}/v1/messages",
+                headers={"x-api-key": rotator.proxy_token, "content-type": "application/json"},
+                content=b'{"model":"m","messages":[],"max_tokens":1,"stream":true}',
+            )
+        assert resp.status_code == 200
+        assert captured["url"] == "http://127.0.0.1:10001/messages"
+        assert captured["x_api_key"] in {
+            "modelscope_proxy_api_key",
+            "modelscope_proxy_api_key_b",
+        }
+    finally:
+        await rotator.stop()
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_rotator_rejects_bad_token() -> None:
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     async with engine.begin() as conn:

@@ -69,6 +69,25 @@ export interface GetSystemVersionResponse {
   update_check_error: string | null;
 }
 
+/** Host IndexTTS2 speech-proxy lifecycle (control agent on :10004). */
+export interface IndexTtsServiceStatus {
+  ok: boolean;
+  running: boolean;
+  available?: boolean | null;
+  started?: boolean | null;
+  already_running?: boolean | null;
+  killed?: number | null;
+  error?: string | null;
+  detail?: string | null;
+  root?: string | null;
+  model_dir?: string | null;
+  missing_models?: string[];
+  control_reachable: boolean;
+  control_base: string;
+  speech_port?: number | null;
+  control_port?: number | null;
+}
+
 /** 首次使用引导的「已看过」状态 —— 实例级，未设置视为未看过。 */
 export interface OnboardingStatus {
   seen: boolean;

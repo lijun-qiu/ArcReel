@@ -36,12 +36,16 @@ function SpeechToken({ token }: { token: Extract<Token, { kind: "speech" }> }) {
   const { t } = useTranslation("dashboard");
   // 画外音没有说话人，`speakerKind` 恒为 unknown，配色因此与未登记说话人同档。
   const palette = assetColor(token.speakerKind);
+  const title =
+    token.speechKind === "inner_monologue"
+      ? t("script_highlight_inner_monologue_of", { speaker: token.speaker })
+      : token.speaker || t("script_highlight_voiceover");
   // 记号原文逐字保留（含 `@[名称]` 与冒号），只加底色与说话人标签：预览要和作者写的
   // 那一行对得上，改写会让「这段被认成台词了吗」难以核对。
   return (
     <span
       className={`rounded-sm bg-[oklch(1_0_0_/_0.06)] ${token.speaker ? palette.textClass : "text-[var(--color-text)]"}`}
-      title={token.speaker || t("script_highlight_voiceover")}
+      title={title}
     >
       {token.text}
     </span>
@@ -68,8 +72,12 @@ function renderTokens(tokens: Token[], keyPrefix: string) {
 function LineRow({ line, index }: { line: ScriptLine; index: number }) {
   const { t } = useTranslation("dashboard");
 
-  if (line.kind === "dialogue") {
+  if (line.kind === "dialogue" || line.kind === "inner_monologue") {
     const palette = assetColor(line.speakerKind);
+    const label =
+      line.kind === "inner_monologue"
+        ? t("script_highlight_inner_monologue_of", { speaker: line.speaker })
+        : line.speaker;
     return (
       <div
         className={`flex items-baseline gap-2 border-l-2 py-0.5 pl-2.5 ${palette.borderClass} bg-[oklch(1_0_0_/_0.03)]`}
@@ -78,7 +86,7 @@ function LineRow({ line, index }: { line: ScriptLine; index: number }) {
           translate="no"
           className={`shrink-0 rounded-sm px-1 ${palette.textClass} ${palette.bgClass}`}
         >
-          {line.speaker}
+          {label}
         </span>
         <span className="min-w-0 flex-1 break-words text-[var(--color-text)]">{line.text}</span>
       </div>

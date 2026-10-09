@@ -1,8 +1,15 @@
 import { useMemo } from "react";
 import { useTranslation } from "react-i18next";
 import { EditableEpisodeTitle } from "@/components/canvas/EditableEpisodeTitle";
+import {
+  EpisodePreviewActions,
+  type EpisodePreviewPlayback,
+  type EpisodePreviewSubtitleCue,
+} from "@/components/canvas/shared/EpisodePreviewActions";
 import { useCostStore } from "@/stores/cost-store";
 import { formatCost, totalBreakdown } from "@/utils/cost-format";
+
+export type { EpisodePreviewPlayback, EpisodePreviewSubtitleCue };
 
 /**
  * 头部统计只需要时长与成片两项，故按结构约束而非绑定具体单元类型：
@@ -19,15 +26,41 @@ export interface EpisodeHeaderProps {
   units: EpisodeHeaderUnit[];
   onSaveTitle?: (next: string) => Promise<void>;
   canEditTitle?: boolean;
+  /** 合成本集预览（覆盖 ``output/episode_N_preview.mp4``）。 */
+  onComposePreview?: () => Promise<EpisodePreviewPlayback>;
+  /** 超分写入独立 ``*_preview_upscaled.mp4``。 */
+  onUpscalePreview?: () => Promise<EpisodePreviewPlayback>;
+  /** 播放合成预览前重新探测磁盘。 */
+  onWatchPreview?: () => Promise<EpisodePreviewPlayback | null>;
+  /** 播放超分成片前重新探测磁盘。 */
+  onWatchUpscaled?: () => Promise<EpisodePreviewPlayback | null>;
+  episodePreviewUrl?: string | null;
+  episodeUpscaledUrl?: string | null;
+  episodePreviewSubtitlesWebvtt?: string | null;
+  episodePreviewSubtitles?: EpisodePreviewSubtitleCue[];
 }
 
-export function EpisodeHeader({ episode, title, units, onSaveTitle, canEditTitle }: EpisodeHeaderProps) {
+export function EpisodeHeader({
+  episode,
+  title,
+  units,
+  onSaveTitle,
+  canEditTitle,
+  onComposePreview,
+  onUpscalePreview,
+  onWatchPreview,
+  onWatchUpscaled,
+  episodePreviewUrl = null,
+  episodeUpscaledUrl = null,
+  episodePreviewSubtitlesWebvtt = null,
+  episodePreviewSubtitles = [],
+}: EpisodeHeaderProps) {
   const { t } = useTranslation("dashboard");
   const epCost = useCostStore((s) => s._episodeIndex.get(episode));
 
   const stats = useMemo(() => {
     const total = units.length;
-    const ready = units.filter((u) => !!u.generated_assets.video_clip).length;
+    const ready = units.filter((u) => !!u.generated_assets?.video_clip).length;
     const totalDur = units.reduce((s, u) => s + u.duration_seconds, 0);
     const percent = total > 0 ? Math.round((ready / total) * 100) : 0;
     return {
@@ -35,10 +68,9 @@ export function EpisodeHeader({ episode, title, units, onSaveTitle, canEditTitle
       ready,
       totalDur,
       percent,
-      // 按全部费用类型聚合，而不是只取 video：参考视频集也会有旁白音频，以及已删改单元
-      // 留下的历史支出，只看 video 桶会让这一集显示得比实际花的少。
       estimated: formatCost(totalBreakdown(epCost?.totals.estimate ?? {})),
       actual: formatCost(totalBreakdown(epCost?.totals.actual ?? {})),
+      canCompose: total > 0 && ready === total,
     };
   }, [units, epCost]);
 
@@ -80,47 +112,62 @@ export function EpisodeHeader({ episode, title, units, onSaveTitle, canEditTitle
         />
       </div>
 
-      <div className="flex shrink-0 items-stretch gap-0">
-        {(
-          [
-            {
-              key: "ready",
-              label: t("reference_episode_header_ready"),
-              value: `${stats.ready}/${stats.total}`,
-              accent: false,
-            },
-            {
-              key: "estimated",
-              label: t("reference_episode_header_estimated"),
-              value: stats.estimated,
-              accent: false,
-            },
-            {
-              key: "actual",
-              label: t("reference_episode_header_actual"),
-              value: stats.actual,
-              accent: true,
-            },
-          ] as const
-        ).map((s, i) => (
-          <div
-            key={s.key}
-            className={`min-w-[64px] px-3.5 ${
-              i === 0 ? "" : "border-l border-[var(--color-hairline-soft)]"
-            }`}
-          >
-            <div className="font-mono text-[10px] font-semibold uppercase tracking-wider text-[var(--color-text-4)]">
-              {s.label}
-            </div>
+      <div className="flex shrink-0 flex-wrap items-stretch gap-3">
+        <EpisodePreviewActions
+          episode={episode}
+          canCompose={stats.canCompose}
+          onComposePreview={onComposePreview}
+          onUpscalePreview={onUpscalePreview}
+          onWatchPreview={onWatchPreview}
+          onWatchUpscaled={onWatchUpscaled}
+          episodePreviewUrl={episodePreviewUrl}
+          episodeUpscaledUrl={episodeUpscaledUrl}
+          episodePreviewSubtitlesWebvtt={episodePreviewSubtitlesWebvtt}
+          episodePreviewSubtitles={episodePreviewSubtitles}
+        />
+
+        <div className="flex items-stretch gap-0">
+          {(
+            [
+              {
+                key: "ready",
+                label: t("reference_episode_header_ready"),
+                value: `${stats.ready}/${stats.total}`,
+                accent: false,
+              },
+              {
+                key: "estimated",
+                label: t("reference_episode_header_estimated"),
+                value: stats.estimated,
+                accent: false,
+              },
+              {
+                key: "actual",
+                label: t("reference_episode_header_actual"),
+                value: stats.actual,
+                accent: true,
+              },
+            ] as const
+          ).map((s, i) => (
             <div
-              className={`mt-0.5 font-mono text-sm font-semibold tabular-nums ${
-                s.accent ? "text-[var(--color-accent-2)]" : "text-[var(--color-text)]"
+              key={s.key}
+              className={`min-w-[64px] px-3.5 ${
+                i === 0 ? "" : "border-l border-[var(--color-hairline-soft)]"
               }`}
             >
-              {s.value}
+              <div className="font-mono text-[10px] font-semibold uppercase tracking-wider text-[var(--color-text-4)]">
+                {s.label}
+              </div>
+              <div
+                className={`mt-0.5 font-mono text-sm font-semibold tabular-nums ${
+                  s.accent ? "text-[var(--color-accent-2)]" : "text-[var(--color-text)]"
+                }`}
+              >
+                {s.value}
+              </div>
             </div>
-          </div>
-        ))}
+          ))}
+        </div>
       </div>
     </div>
   );

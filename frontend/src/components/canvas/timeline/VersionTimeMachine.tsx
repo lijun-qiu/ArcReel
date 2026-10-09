@@ -1,12 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
-import { ChevronDown, ChevronRight, Download, History } from "lucide-react";
+import { ChevronDown, ChevronRight, Download, History, Trash2 } from "lucide-react";
 import { API, type VersionInfo } from "@/api";
 import { useAppStore } from "@/stores/app-store";
 import { useProjectsStore } from "@/stores/projects-store";
 import { errMsg } from "@/utils/async";
 import { PresentationPlayer } from "@/components/shared/PresentationPlayer";
+import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 
 interface VersionTimeMachineProps {
   projectName: string;
@@ -90,6 +91,8 @@ export function VersionTimeMachine({
   const [loadedOnce, setLoadedOnce] = useState(false);
   const [selectedVersion, setSelectedVersion] = useState<number | null>(null);
   const [restoringVersion, setRestoringVersion] = useState<number | null>(null);
+  const [deletingVersion, setDeletingVersion] = useState<number | null>(null);
+  const [confirmDeleteVersion, setConfirmDeleteVersion] = useState<number | null>(null);
 
   // Reset version list when the underlying resource changes so it's re-fetched
   // on next open. Do NOT close the panel — if it's open and a new generation
@@ -103,6 +106,8 @@ export function VersionTimeMachine({
     setLoadedOnce(false);
     setSelectedVersion(null);
     setRestoringVersion(null);
+    setDeletingVersion(null);
+    setConfirmDeleteVersion(null);
   }, [resourceFp, projectName, resourceId, resourceType]);
 
   // Fetch versions once when panel first opens
@@ -129,7 +134,7 @@ export function VersionTimeMachine({
   async function handleRestore(version: number) {
     // disabled 是响应式的 restoringVersion/busy：面板打开期间资源转为占用中时随之更新，
     // 这里兜底防止禁用态生效前的一次点击仍发出恢复请求。
-    if (busy || restoringVersion !== null) return;
+    if (busy || restoringVersion !== null || deletingVersion !== null) return;
     // 渲染快照之外再做一次新鲜读：状态已变、渲染未到的窗口里按钮仍可点。
     if (checkBusy?.()) {
       useAppStore.getState().pushToast(t("version_restore_busy_hint"), "error");
@@ -153,6 +158,34 @@ export function VersionTimeMachine({
     } finally {
       setRestoringVersion(null);
       onRestoringChange?.(false);
+    }
+  }
+
+  async function handleDelete(version: number) {
+    if (busy || restoringVersion !== null || deletingVersion !== null) return;
+    if (checkBusy?.()) {
+      useAppStore.getState().pushToast(t("version_delete_busy_hint"), "error");
+      return;
+    }
+    setDeletingVersion(version);
+    try {
+      const result = await API.deleteVersion(projectName, resourceType, resourceId, version);
+      if (result.asset_fingerprints) {
+        useProjectsStore.getState().updateAssetFingerprints(result.asset_fingerprints);
+      }
+      await loadVersions();
+      setSelectedVersion((prev) => (prev === version ? null : prev));
+      setConfirmDeleteVersion(null);
+      if (result.cleared_current) {
+        await onRestore?.(version);
+      }
+      useAppStore.getState().pushToast(t("version_deleted", { version }), "success");
+    } catch (err) {
+      useAppStore
+        .getState()
+        .pushToast(t("delete_version_failed", { message: errMsg(err) }), "error");
+    } finally {
+      setDeletingVersion(null);
     }
   }
 
@@ -343,21 +376,43 @@ export function VersionTimeMachine({
                           {selectedInfo.created_at}
                         </span>
                       </span>
-                      {selectedInfo.is_current ? (
-                        <span className="shrink-0 rounded-full bg-indigo-500/10 px-2 py-0.5 text-[10px] font-medium text-indigo-300">
-                          {t("current_version_badge")}
-                        </span>
-                      ) : !readOnly && selectedInfo.restorable !== false ? (
-                        <button
-                          type="button"
-                          disabled={restoringVersion !== null || busy}
-                          onClick={() => void handleRestore(selectedInfo.version)}
-                          title={busy ? t("version_restore_busy_hint") : undefined}
-                          className="shrink-0 rounded-full bg-indigo-600 px-2.5 py-0.5 text-[10px] font-medium text-white transition-colors hover:bg-indigo-500 disabled:opacity-50"
-                        >
-                          {restoringVersion === selectedInfo.version ? t("switching_version") : t("switch_to_version")}
-                        </button>
-                      ) : null}
+                      <div className="flex shrink-0 items-center gap-1.5">
+                        {selectedInfo.is_current ? (
+                          <span className="rounded-full bg-indigo-500/10 px-2 py-0.5 text-[10px] font-medium text-indigo-300">
+                            {t("current_version_badge")}
+                          </span>
+                        ) : null}
+                        {!readOnly &&
+                          (!selectedInfo.is_current ||
+                            (versions.length === 1 &&
+                              (resourceType === "reference_videos" ||
+                                resourceType === "videos" ||
+                                resourceType === "audio"))) ? (
+                          <>
+                            {!selectedInfo.is_current && selectedInfo.restorable !== false ? (
+                              <button
+                                type="button"
+                                disabled={restoringVersion !== null || deletingVersion !== null || busy}
+                                onClick={() => void handleRestore(selectedInfo.version)}
+                                title={busy ? t("version_restore_busy_hint") : undefined}
+                                className="rounded-full bg-indigo-600 px-2.5 py-0.5 text-[10px] font-medium text-white transition-colors hover:bg-indigo-500 disabled:opacity-50"
+                              >
+                                {restoringVersion === selectedInfo.version ? t("switching_version") : t("switch_to_version")}
+                              </button>
+                            ) : null}
+                            <button
+                              type="button"
+                              disabled={restoringVersion !== null || deletingVersion !== null || busy}
+                              onClick={() => setConfirmDeleteVersion(selectedInfo.version)}
+                              title={busy ? t("version_delete_busy_hint") : t("delete_version")}
+                              aria-label={t("delete_version")}
+                              className="inline-flex h-6 w-6 items-center justify-center rounded-full border border-red-500/30 bg-red-500/10 text-red-300 transition-colors hover:bg-red-500/20 disabled:opacity-50"
+                            >
+                              <Trash2 className="h-3 w-3" aria-hidden />
+                            </button>
+                          </>
+                        ) : null}
+                      </div>
                     </div>
 
                     {/* Media preview */}
@@ -433,6 +488,28 @@ export function VersionTimeMachine({
           </div>,
           document.body,
         )}
+
+      <ConfirmDialog
+        open={confirmDeleteVersion !== null}
+        title={t(
+          versions.length === 1 && confirmDeleteVersion === currentVersion
+            ? "delete_sole_current_version_confirm"
+            : "delete_version_confirm",
+          { version: confirmDeleteVersion ?? 0 },
+        )}
+        confirmLabel={t("common:delete")}
+        loadingLabel={t("deleting_version")}
+        tone="danger"
+        loading={deletingVersion !== null}
+        onConfirm={() => {
+          if (confirmDeleteVersion !== null) {
+            void handleDelete(confirmDeleteVersion);
+          }
+        }}
+        onCancel={() => {
+          if (deletingVersion === null) setConfirmDeleteVersion(null);
+        }}
+      />
     </div>
   );
 }

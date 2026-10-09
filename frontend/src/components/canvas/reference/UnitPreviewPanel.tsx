@@ -1,5 +1,5 @@
 import { useTranslation } from "react-i18next";
-import { Film, Loader2, Sparkles, RotateCcw, AlertTriangle } from "lucide-react";
+import { Film, Loader2, Sparkles, RotateCcw, AlertTriangle, Maximize2 } from "lucide-react";
 import { API } from "@/api";
 import { useProjectsStore } from "@/stores/projects-store";
 import { VersionTimeMachine } from "@/components/canvas/timeline/VersionTimeMachine";
@@ -41,6 +41,12 @@ export interface UnitPreviewPanelProps {
   onUploadVideo?: (unitId: string, file: File) => void | Promise<void>;
   /** 上传进行中 */
   uploadingVideo?: boolean;
+  /** 超分成片；未提供时不显示超分入口 */
+  onUpscaleVideo?: (unitId: string) => void | Promise<void>;
+  /** 超分进行中 */
+  upscalingVideo?: boolean;
+  /** 超分进度 0–100；有值时按钮文案带百分比 */
+  upscalePercent?: number | null;
   /**
    * 该 unit 的版本恢复请求在途。恢复不产生任务行、进不了 tasks-store 占用集，状态由
    * {@link VersionTimeMachine} 经 `onRestoringChange` 上报，但必须存在**本面板之外**：
@@ -81,13 +87,16 @@ export function UnitPreviewPanel({
   generationBlocked = false,
   onUploadVideo,
   uploadingVideo,
+  onUpscaleVideo,
+  upscalingVideo,
+  upscalePercent,
   restoring = false,
   onRestoringChange,
   checkBusy,
   onRestored,
 }: UnitPreviewPanelProps) {
   const { t } = useTranslation("dashboard");
-  const clip = unit?.generated_assets.video_clip ?? null;
+  const clip = unit?.generated_assets?.video_clip ?? null;
   // 上传/还原后路径不变，靠 fingerprint cache-bust 让 <video> 重新拉取
   const clipFp = useProjectsStore((s) => (clip ? s.getAssetFingerprint(clip) : null));
 
@@ -102,7 +111,7 @@ export function UnitPreviewPanel({
   const effectiveStatus = status ?? resolveUnitStatus(unit);
   const videoUrl = clip && projectName ? API.getFileUrl(projectName, clip, clipFp) : null;
   const hasNarrationText = Boolean(narrationText?.trim());
-  const narrationAudio = unit.generated_assets.narration_audio ?? null;
+  const narrationAudio = unit.generated_assets?.narration_audio ?? null;
 
   // 状态先于 video_clip 落库的窗口里，effectiveStatus==="ready" 但 videoUrl
   // 还为 null —— 这种情况下走 inFlight 占位避免空白面板。
@@ -136,9 +145,37 @@ export function UnitPreviewPanel({
             accept={UPLOAD_VIDEO_ACCEPT}
             label={t("media_upload_video")}
             busy={uploadingVideo}
-            disabled={inFlight || busy || restoring}
+            disabled={inFlight || busy || restoring || Boolean(upscalingVideo)}
             onSelect={(f) => void onUploadVideo(unit.unit_id, f)}
           />
+        )}
+        {/* 有成片路径即露出：不依赖 videoUrl / PresentationPlayer 是否已拉通，避免空预览时按钮消失 */}
+        {Boolean(clip) && onUpscaleVideo && (
+          <button
+            type="button"
+            title={t("reference_preview_upscale")}
+            aria-label={t("reference_preview_upscale")}
+            disabled={inFlight || busy || restoring || Boolean(uploadingVideo) || Boolean(upscalingVideo)}
+            onClick={() => void onUpscaleVideo(unit.unit_id)}
+            className={`inline-flex h-7 items-center gap-1 rounded-md border border-[var(--color-hairline)] px-2 text-[11px] font-medium transition-colors ${
+              inFlight || busy || restoring || uploadingVideo || upscalingVideo
+                ? "cursor-not-allowed text-[var(--color-text-4)] opacity-60"
+                : "text-[var(--color-text-2)] hover:bg-[oklch(1_0_0_/_0.06)] hover:text-[var(--color-text)]"
+            }`}
+          >
+            {upscalingVideo ? (
+              <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
+            ) : (
+              <Maximize2 className="h-3.5 w-3.5" aria-hidden="true" />
+            )}
+            <span>
+              {upscalingVideo
+                ? upscalePercent != null && upscalePercent > 0
+                  ? t("reference_preview_upscaling_pct", { percent: Math.round(upscalePercent) })
+                  : t("reference_preview_upscaling")
+                : t("reference_preview_upscale")}
+            </span>
+          </button>
         )}
         {/* 版本恢复同样写这个 unit 的成片文件，与上传、主 CTA 同步接线禁用：
             占用期间恢复旧版本会显示成功、随后被在跑的生成任务覆盖 */}
@@ -148,7 +185,7 @@ export function UnitPreviewPanel({
             resourceType="reference_videos"
             resourceId={unit.unit_id}
             onRestore={onRestored}
-            busy={inFlight || busy || Boolean(uploadingVideo) || restoring}
+            busy={inFlight || busy || Boolean(uploadingVideo) || Boolean(upscalingVideo) || restoring}
             onRestoringChange={(r) => onRestoringChange?.(unit.unit_id, r)}
             checkBusy={checkBusy ? () => checkBusy(unit.unit_id) : undefined}
             iconOnly
@@ -230,17 +267,19 @@ export function UnitPreviewPanel({
         <button
           type="button"
           onClick={() => onGenerate(unit.unit_id)}
-          disabled={inFlight || busy || restoring || generationBlocked}
+          disabled={inFlight || busy || restoring || generationBlocked || Boolean(upscalingVideo)}
           className={`focus-ring inline-flex items-center justify-center gap-2 rounded-lg px-3.5 py-2.5 text-sm font-semibold transition-colors ${
-            inFlight || busy || restoring || generationBlocked
+            inFlight || busy || restoring || generationBlocked || upscalingVideo
               ? "cursor-not-allowed border border-[var(--color-hairline)] bg-[oklch(0.22_0.011_265_/_0.6)] text-[var(--color-text-3)]"
               : "text-[oklch(0.14_0_0)] [background:linear-gradient(180deg,var(--color-accent-2),var(--color-accent))] shadow-[inset_0_1px_0_oklch(1_0_0_/_0.3),0_4px_14px_-4px_var(--color-accent-glow)]"
           }`}
         >
-          {inFlight ? (
+          {inFlight || upscalingVideo ? (
             <>
               <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
-              <span>{t("reference_preview_generating")}</span>
+              <span>
+                {upscalingVideo ? t("reference_preview_upscaling") : t("reference_preview_generating")}
+              </span>
             </>
           ) : (
             <>

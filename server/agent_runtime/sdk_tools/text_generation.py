@@ -58,8 +58,10 @@ from lib.reference_video.draft_validation import (
     DraftViolation,
     collect_violations,
     validate_dialogue_load,
+    validate_source_dialogue_coverage,
     validate_source_text_anchor,
     validate_unit_text,
+    validate_visual_density,
 )
 from lib.reference_video.script_preview import (
     WARN_REFERENCE_AUDIO_OVERFLOW,
@@ -69,7 +71,7 @@ from lib.reference_video.script_preview import (
     derive_utterances,
     derive_voice_bindings,
 )
-from lib.reference_video.text_parser import extract_mentions
+from lib.reference_video.text_parser import extract_mention_refs
 from lib.reference_video.voice_settings import VoiceRenderSettings
 from lib.script_generator import ScriptGenerator
 from lib.script_models import (
@@ -77,6 +79,7 @@ from lib.script_models import (
     build_drama_normalized_script_model,
     build_reference_units_step1_model,
 )
+from lib.source_dialogue import register_source_speakers
 from lib.speech_composition import admit_script_unit
 from lib.speech_rate import project_speech_rate_override
 from lib.text_backends.base import DEFAULT_MAX_OUTPUT_TOKENS, TextGenerationRequest, TextTaskType
@@ -751,7 +754,7 @@ def _collect_reference_flat_violations(
 
     schema 已卡死时长枚举与外层形状；此处补依赖运行时能力值 / 项目登记表 / 源文的约束——
     时长落在该 unit 引用状态对应的生效档位内、原文锚是源文逐字子串、正文语法与资产引用合法、
-    台词量念得完。收齐而非首个即抛：报告要能一次列全所有坏 unit，否则 agent 每修一处就要再跑
+    台词量念得完、画面节拍演得完。收齐而非首个即抛：报告要能一次列全所有坏 unit，否则 agent 每修一处就要再跑
     一轮才知道下一处。
 
     时长档位与正文合并为一个入口：适用哪套档位取决于该 unit 正文里有没有 `@[名称]` 提及——
@@ -778,9 +781,20 @@ def _collect_reference_flat_violations(
                     lambda la=label, tx=text, d=duration: validate_dialogue_load(
                         la, tx, d, source_language, speech_rate_override
                     ),
+                    lambda la=label, tx=text, d=duration: validate_visual_density(la, tx, d),
                 ]
             )
         )
+    violations.extend(
+        collect_violations(
+            [
+                lambda units=flat_units, source=novel_text: validate_source_dialogue_coverage(
+                    [unit["text"] for unit in units],
+                    source,
+                )
+            ]
+        )
+    )
     return violations
 
 
@@ -866,7 +880,10 @@ def _reference_result_text(step1_path: Path, units: list[dict], warning_lines: l
     不在产出当时说，agent 与用户都不会知道声音一致性已经打了折。
     """
     total_seconds = sum(int(u.get("duration_seconds") or 0) for u in units)
-    max_unit_refs = max(len(extract_mentions(str(u.get("text") or ""))) for u in units)
+    max_unit_refs = max(
+        (len(extract_mention_refs(str(u.get("text") or ""))) for u in units),
+        default=0,
+    )
     text = (
         f"✅ 参考视频单元{action}（结构化 step1）已保存: {step1_path}\n"
         f"📊 生成统计: {len(units)} 个 unit，总时长 {total_seconds} 秒；"
@@ -875,6 +892,14 @@ def _reference_result_text(step1_path: Path, units: list[dict], warning_lines: l
     if warning_lines:
         text += "\n⚠️ 声音降级提示（不阻断，产物已落盘）:\n" + "\n".join(f"- {line}" for line in warning_lines)
     return text
+
+
+def _with_registered_speakers(text: str, speakers: tuple[str, ...]) -> str:
+    """拆分回执前缀：本次新写入角色表的源文说话人。"""
+
+    if not speakers:
+        return text
+    return f"已登记源文说话人: {'、'.join(speakers)}\n{text}"
 
 
 class ReferenceDraftRevalidation(NamedTuple):
@@ -990,6 +1015,7 @@ async def _promote_reference_step1(ctx: ToolContext, episode: int, draft: Quaran
             content=draft.content,
             violations=violations,
             meta=draft.meta,
+            count_promote=True,
         )
         return {"content": [{"type": "text", "text": report}], "is_error": True}
     if violations:
@@ -1000,6 +1026,7 @@ async def _promote_reference_step1(ctx: ToolContext, episode: int, draft: Quaran
             content={"units": flat_units},
             violations=violations,
             meta=draft.meta,
+            count_promote=True,
         )
         return {"content": [{"type": "text", "text": report}], "is_error": True}
 
@@ -1172,6 +1199,7 @@ async def _promote_drama_step1(ctx: ToolContext, episode: int, draft: Quarantine
             content=draft.content,
             violations=[violation],
             meta=draft.meta,
+            count_promote=True,
         )
         return {"content": [{"type": "text", "text": report}], "is_error": True}
 
@@ -1185,6 +1213,7 @@ async def _promote_drama_step1(ctx: ToolContext, episode: int, draft: Quarantine
             content=draft.content,
             violations=[violation],
             meta=draft.meta,
+            count_promote=True,
         )
         return {"content": [{"type": "text", "text": report}], "is_error": True}
     for scene in raw_scenes:
@@ -1323,7 +1352,7 @@ async def _open_drama_step1_for_edit(ctx: ToolContext, episode: int, source: str
                     "duration_seconds / segment_break / 出场资产；needs_replan 是按台词准入派生的标记，"
                     "不在草稿里、也不要手写。增删场景即增删数组元素。\n"
                     f'改完调用 {PROMOTE_TOOL_NAME}({{"episode": {episode}}}) 全量校验并晋升回正式文件；'
-                    "违约时返回逐条报告，继续改再晋升，无轮次上限。\n"
+                    "违约时返回逐条报告，继续改再晋升，同一草稿最多 5 次；达到上限后停止并把剩余违约回报用户。\n"
                     "草稿在场期间审阅门与 step2 生成被阻塞；放弃修改就原样晋升（内容未变即等于回写原稿）。"
                 ),
             }
@@ -1464,7 +1493,7 @@ def open_step1_for_edit_tool(ctx: ToolContext):
                             "unit_id 是派生物，不在草稿里、也不要手写。"
                             "增删 unit 即增删数组元素，unit_id 按新顺序重编。\n"
                             f'改完调用 {PROMOTE_TOOL_NAME}({{"episode": {episode}}}) 全量校验并晋升回正式文件；'
-                            "违约时返回逐条报告，继续改再晋升，无轮次上限。\n"
+                            "违约时返回逐条报告，继续改再晋升，同一草稿最多 5 次；达到上限后停止并把剩余违约回报用户。\n"
                             "草稿在场期间审阅门与 step2 生成被阻塞；放弃修改就原样晋升（内容未变即等于回写原稿）。"
                         ),
                     }
@@ -1519,6 +1548,20 @@ def split_reference_video_units_tool(ctx: ToolContext):
                 )
             except ValueError as exc:
                 return {"content": [{"type": "text", "text": f"❌ {exc}"}], "is_error": True}
+
+            added_speakers = register_source_speakers(ctx.pm, ctx.project_name, novel_text)
+            if added_speakers:
+                project = ctx.pm.load_project(ctx.project_name)
+                try:
+                    novel_text, prompt_inputs, step1_basis = _load_step1_source_with_basis(
+                        project_path,
+                        source,
+                        project,
+                        episode,
+                        "reference_video",
+                    )
+                except ValueError as exc:
+                    return {"content": [{"type": "text", "text": f"❌ {exc}"}], "is_error": True}
 
             characters = cast(dict[str, Any], prompt_inputs["characters"])
             scenes = cast(dict[str, Any], prompt_inputs["scenes"])
@@ -1611,7 +1654,10 @@ def split_reference_video_units_tool(ctx: ToolContext):
                             "base_fingerprint": script_review.content_fingerprint(step1_path),
                         },
                     )
-                return {"content": [{"type": "text", "text": report}], "is_error": True}
+                return {
+                    "content": [{"type": "text", "text": _with_registered_speakers(report, added_speakers)}],
+                    "is_error": True,
+                }
 
             raw_units = _build_reference_units_from_flat(
                 flat_units, project, episode=episode, max_refs=split_caps.max_refs
@@ -1627,7 +1673,10 @@ def split_reference_video_units_tool(ctx: ToolContext):
                 "content": [
                     {
                         "type": "text",
-                        "text": _reference_result_text(step1_path, raw_units, warning_lines, action="拆分"),
+                        "text": _with_registered_speakers(
+                            _reference_result_text(step1_path, raw_units, warning_lines, action="拆分"),
+                            added_speakers,
+                        ),
                     }
                 ]
             }
@@ -1647,7 +1696,7 @@ def validate_and_promote_draft_tool(ctx: ToolContext):
         PROMOTE_TOOL_NAME,
         "重新全量校验本集的隔离草稿（step1 产出、step2 视觉展开的违约产物，或取回编辑的正式 step1），"
         "通过则晋升为正式文件并清除草稿，不通过则返回刷新后的违约报告。"
-        "在修改过隔离草稿的 content 之后调用；可反复调用，无轮次上限。",
+        "在修改过隔离草稿的 content 之后调用；同一草稿最多晋升 5 次，达到上限后停止并把剩余违约回报用户。",
         {
             "type": "object",
             "properties": {"episode": {"type": "integer", "description": "剧集编号"}},

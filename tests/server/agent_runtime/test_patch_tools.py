@@ -1389,6 +1389,43 @@ class TestPatchProjectSettings:
         assert key not in ctx.pm.load_project("demo")
 
     @pytest.mark.unit
+    async def test_set_and_clear_planning_split_mode(self, ctx: ToolContext) -> None:
+        """planning_split_mode：llm/markers 写入，null 清除。"""
+        out = await _call(patch_project_tool(ctx), {"settings": {"planning_split_mode": "markers"}})
+        assert out.get("is_error") is not True
+        assert ctx.pm.load_project("demo")["planning_split_mode"] == "markers"
+        out = await _call(patch_project_tool(ctx), {"settings": {"planning_split_mode": None}})
+        assert out.get("is_error") is not True
+        assert "planning_split_mode" not in ctx.pm.load_project("demo")
+
+    @pytest.mark.unit
+    async def test_set_and_clear_auto_confirm_step1(self, ctx: ToolContext) -> None:
+        """auto_confirm_step1：布尔写入，null 清除；拒绝非布尔。"""
+        out = await _call(patch_project_tool(ctx), {"settings": {"auto_confirm_step1": True}})
+        assert out.get("is_error") is not True
+        assert ctx.pm.load_project("demo")["auto_confirm_step1"] is True
+        out = await _call(patch_project_tool(ctx), {"settings": {"auto_confirm_step1": False}})
+        assert out.get("is_error") is not True
+        assert ctx.pm.load_project("demo")["auto_confirm_step1"] is False
+        out = await _call(patch_project_tool(ctx), {"settings": {"auto_confirm_step1": None}})
+        assert out.get("is_error") is not True
+        assert "auto_confirm_step1" not in ctx.pm.load_project("demo")
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("bad_value", ["true", 1, "yes", ""])
+    async def test_invalid_auto_confirm_step1_rejected(self, ctx: ToolContext, bad_value: Any) -> None:
+        out = await _call(patch_project_tool(ctx), {"settings": {"auto_confirm_step1": bad_value}})
+        assert out.get("is_error") is True
+        assert "auto_confirm_step1" not in ctx.pm.load_project("demo")
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("bad_value", ["smart", "", 1, True])
+    async def test_invalid_planning_split_mode_rejected(self, ctx: ToolContext, bad_value: Any) -> None:
+        out = await _call(patch_project_tool(ctx), {"settings": {"planning_split_mode": bad_value}})
+        assert out.get("is_error") is True
+        assert "planning_split_mode" not in ctx.pm.load_project("demo")
+
+    @pytest.mark.unit
     async def test_table_and_settings_together_rejected(self, ctx: ToolContext) -> None:
         out = await _call(
             patch_project_tool(ctx),

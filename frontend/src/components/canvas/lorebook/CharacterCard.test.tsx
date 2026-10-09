@@ -160,7 +160,8 @@ describe("CharacterCard", () => {
       />,
     );
 
-    const textarea = screen.getByPlaceholderText(/角色描述/);
+    fireEvent.click(screen.getByRole("button", { name: /展开编辑/ }));
+    const textarea = await screen.findByPlaceholderText(/角色描述/);
     Object.defineProperty(textarea, "scrollHeight", {
       configurable: true,
       value: 128,
@@ -306,7 +307,7 @@ describe("CharacterCard", () => {
     expect(deleteSpy).not.toHaveBeenCalled();
   });
 
-  it("renders no write entries when read-only", () => {
+  it("renders no write entries when read-only", async () => {
     render(
       <CharacterCard
         name="Hero"
@@ -324,11 +325,65 @@ describe("CharacterCard", () => {
 
     // 内容照旧展示，只是每一个写入口都不在了
     expect(screen.getByText("Hero")).toBeInTheDocument();
-    expect(screen.getByPlaceholderText(/角色描述/)).toHaveAttribute("readonly");
+    expect(screen.getByText("hero desc")).toBeInTheDocument();
     expect(screen.queryByTestId("version-time-machine")).toBeNull();
-    expect(screen.queryByRole("button", { name: /生成|上传|入库|保存/ })).toBeNull();
+    expect(screen.queryByRole("button", { name: /生成设计图|重新生成|上传|入库|保存/ })).toBeNull();
+    expect(screen.queryByRole("button", { name: /添加造型/ })).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: /展开编辑/ }));
+    const textarea = await screen.findByPlaceholderText(/角色描述/);
+    expect(textarea).toHaveAttribute("readonly");
+    expect(screen.queryByRole("button", { name: /^完成$/ })).toBeNull();
+
     for (const field of screen.getAllByRole("textbox")) {
       expect(field).toHaveAttribute("readonly");
     }
+  });
+
+  it("opens wardrobe look details from a thumbnail", async () => {
+    render(
+      <CharacterCard
+        name="林北"
+        character={{
+          description: "base desc",
+          voice_style: "cold",
+          looks: {
+            base: { description: "base desc", character_sheet: "characters/林北.png" },
+            战损: {
+              description: "battle damage look",
+              character_sheet: "characters/林北__战损.png",
+            },
+          },
+        }}
+        projectName="demo"
+        onSave={vi.fn()}
+        onGenerate={vi.fn()}
+      />,
+    );
+
+    expect(screen.queryByText("battle damage look")).not.toBeInTheDocument();
+    expect(screen.queryByText(/基准造型即默认角色图/)).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /林北@战损/ }));
+    expect(await screen.findByText("battle damage look")).toBeInTheDocument();
+    expect(screen.getByText(/完整生图 Prompt/)).toBeInTheDocument();
+    expect(screen.getByText(/本造型差异：battle damage look/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /生成造型图/ })).toBeInTheDocument();
+  });
+
+  it("opens add-look form in a modal from the plus thumbnail", async () => {
+    render(
+      <CharacterCard
+        name="林北"
+        character={{ description: "base desc", voice_style: "cold" }}
+        projectName="demo"
+        onSave={vi.fn()}
+        onGenerate={vi.fn()}
+      />,
+    );
+
+    expect(screen.queryByPlaceholderText(/造型名/)).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /添加造型/ }));
+    expect(await screen.findByPlaceholderText(/造型名/)).toBeInTheDocument();
+    expect(screen.getByText(/基准造型即默认角色图/)).toBeInTheDocument();
   });
 });

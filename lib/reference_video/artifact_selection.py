@@ -14,6 +14,7 @@ from lib.artifact_activation import (
     snapshot_usable_artifact_input_claim,
 )
 from lib.artifact_manifest import ArtifactKey
+from lib.character_looks import look_asset_id
 from lib.reference_video.request_projection import FilesystemReferenceAssets, ResolvedReferenceAsset
 
 
@@ -39,7 +40,14 @@ class CurrentReferenceAssets:
         except ValueError:
             return None
         return ArtifactInputClaim(
-            key=ArtifactKey.asset_sheet(asset.reference.type, asset.reference.name),
+            key=ArtifactKey.asset_sheet(
+                asset.reference.type,
+                (
+                    look_asset_id(asset.reference.name, asset.reference.look)
+                    if asset.reference.type == "character"
+                    else asset.reference.name
+                ),
+            ),
             artifact_path=artifact_path,
         )
 

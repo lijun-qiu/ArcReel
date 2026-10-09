@@ -42,6 +42,7 @@ from lib.artifact_version_provenance import IMAGE_ARTIFACT_BASIS_FIELD
 from lib.asset_types import (
     ASSET_SPECS,
     AssetSpec,
+    asset_name_comparison_key,
     normalize_asset_bucket,
     normalize_asset_name,
     resolve_asset_key,
@@ -87,6 +88,7 @@ from lib.project_manager import (
 )
 from lib.prompt_builders import (
     append_product_fidelity_tail,
+    build_character_look_prompt,
     build_character_prompt,
     build_product_prompt,
     build_prop_prompt,
@@ -118,9 +120,11 @@ from lib.speech_artifact_provenance import build_video_duration_basis
 from lib.speech_composition import SpeechAdmissionError, admit_script_unit
 from lib.storyboard_sequence import (
     build_previous_storyboard_reference,
+    character_names_on_item,
     find_storyboard_item,
     get_storyboard_items,
     group_scenes_by_segment_break,
+    item_uses_previous_storyboard,
     resolve_previous_storyboard_path,
 )
 from lib.thumbnail import extract_video_thumbnail
@@ -442,6 +446,7 @@ def _collect_sheet_references(
     visual_references: list[VisualReference] | None = None,
     currency_resolver: ArtifactCurrencyResolver,
     formal_claims: list[ArtifactInputClaim] | None = None,
+    skip_character_names: frozenset[str] | None = None,
 ) -> tuple[list[dict], set[str]]:
     """Collect character_sheet, scene_sheet and prop_sheet references from scene/segment items.
 
@@ -456,9 +461,13 @@ def _collect_sheet_references(
 
     ``char_field`` 为 ``None`` 表示该骨架无逐条角色名单字段（video_units：角色以
     references 条目形态存在），``item.get(None) or []`` 天然跳过角色 sheet 收集。
+
+    ``skip_character_names``：已归一的角色名集合；收集角色 sheet 时跳过（上一镜分镜
+    已启用时，上一镜已出场角色默认不再重复注入资产图）。
     """
     seen: set[str] = set()
     refs: list[dict] = []
+    skip_characters = skip_character_names or frozenset()
 
     sources = (
         (
@@ -487,6 +496,11 @@ def _collect_sheet_references(
                 if not isinstance(name, str):
                     continue
                 canonical_name = normalize_asset_name(name)
+                if (
+                    asset_type == "character"
+                    and asset_name_comparison_key(name) in skip_characters
+                ):
+                    continue
                 data = bucket.get(canonical_name)
                 sheet = data.get(sheet_field) if isinstance(data, dict) else None
                 if not isinstance(sheet, str) or not sheet or sheet in seen:
@@ -538,6 +552,7 @@ def _collect_reference_images(
     artifact_episode: int | None = None,
     currency_resolver: ArtifactCurrencyResolver,
     formal_claims: list[ArtifactInputClaim] | None = None,
+    skip_character_names: frozenset[str] | None = None,
 ) -> list[object] | None:
     sheet_refs, _ = _collect_sheet_references(
         project,
@@ -549,6 +564,7 @@ def _collect_reference_images(
         visual_references=visual_references,
         currency_resolver=currency_resolver,
         formal_claims=formal_claims,
+        skip_character_names=skip_character_names,
     )
     reference_images: list[object] = list(sheet_refs)
 
@@ -761,15 +777,25 @@ def _asset_sheet_metadata_mutator(
     """Point one asset entry at its new sheet and record the patch for compensation."""
 
     def _mutate(project: dict[str, Any]) -> None:
+        from lib.character_looks import LOOK_FILE_SEP, parse_look_asset_id, set_look_sheet
+
         bucket = project.get(spec.bucket_key)
-        key = resolve_asset_key(bucket, resource_id)
+        char_name, look = (resource_id, None)
+        lookup_id = resource_id
+        if spec.asset_type == "character" and LOOK_FILE_SEP in resource_id:
+            char_name, look = parse_look_asset_id(resource_id)
+            lookup_id = char_name
+        key = resolve_asset_key(bucket, lookup_id)
         if not isinstance(bucket, dict) or key is None:
-            raise KeyError(f"{spec.label_zh} '{resource_id}' 不存在")
+            raise KeyError(f"{spec.label_zh} '{lookup_id}' 不存在")
         entry = bucket[key]
         if not isinstance(entry, dict):
-            raise ValueError(f"{spec.label_zh} '{resource_id}' metadata must be an object")
+            raise ValueError(f"{spec.label_zh} '{lookup_id}' metadata must be an object")
         before = copy.deepcopy(entry)
-        entry[spec.sheet_field] = sheet_path
+        if spec.asset_type == "character":
+            set_look_sheet(entry, look, sheet_path)
+        else:
+            entry[spec.sheet_field] = sheet_path
         mutation_box.append(OptimisticMappingPatch.capture(before, entry))
 
     return _mutate
@@ -787,8 +813,13 @@ def _asset_sheet_metadata_compensator(
 
     def _compensate_metadata(reject: Callable[[], None]) -> None:
         def _restore(project: dict[str, Any]) -> None:
+            from lib.character_looks import LOOK_FILE_SEP, parse_look_asset_id
+
             bucket = project.get(spec.bucket_key)
-            key = resolve_asset_key(bucket, resource_id)
+            lookup_id = resource_id
+            if spec.asset_type == "character" and LOOK_FILE_SEP in resource_id:
+                lookup_id, _look = parse_look_asset_id(resource_id)
+            key = resolve_asset_key(bucket, lookup_id)
             if isinstance(bucket, dict) and key is not None and isinstance(bucket[key], dict):
                 mutation.restore(bucket[key])
 
@@ -1598,10 +1629,18 @@ async def execute_storyboard_task(
         _semantic_prompt = _target_item.get("image_prompt")
 
         _prev_path = resolve_previous_storyboard_path(_project_path, _items, _id_field, resource_id)
+        if _prev_path is not None and not item_uses_previous_storyboard(_target_item):
+            _prev_path = None
         _previous_id = (
             str(_items[_target_index - 1].get(_id_field) or "")
             if _prev_path is not None and _target_index > 0
             else None
+        )
+        # 上一镜分镜已启用时：上一镜已出场角色默认不再注入其资产图（构图已由上一镜承接）。
+        _skip_characters = (
+            character_names_on_item(_items[_target_index - 1], _char_field)
+            if _prev_path is not None and _target_index > 0
+            else frozenset()
         )
         _style = _project.get("style", "")
         _style_description = _project.get("style_description", "")
@@ -1623,6 +1662,7 @@ async def execute_storyboard_task(
             artifact_episode=_artifact_episode,
             currency_resolver=_currency_resolver,
             formal_claims=_formal_claims,
+            skip_character_names=_skip_characters,
         )
         # 产品镜头：产品参考全量注入且排序绝对优先（先于角色/场景/道具 sheet），
         # 并附高保真还原指令；氛围镜头零产品图，既有装配不变。
@@ -2799,28 +2839,62 @@ async def execute_character_task(
         raise ValueError("prompt is required for character task")
 
     def _prepare_char():
+        from lib.character_looks import (
+            LOOK_FILE_SEP,
+            get_look_entry,
+            parse_look_asset_id,
+            resolve_look_sheet_path,
+        )
+
         _project = get_project_manager().load_project(project_name)
         _project_path = get_project_manager().get_project_path(project_name)
-        _char_key = resolve_asset_key(_project.get("characters"), resource_id)
+        _look = None
+        _display_id = resource_id
+        if LOOK_FILE_SEP in resource_id:
+            _char_name, _look = parse_look_asset_id(resource_id)
+            _display_id = _char_name
+        else:
+            _char_name = resource_id
+        _char_key = resolve_asset_key(_project.get("characters"), _char_name)
         if _char_key is None:
-            raise ValueError(f"character not found: {resource_id}")
+            raise ValueError(f"character not found: {_char_name}")
         _char_data = _project["characters"][_char_key]
         _style = _project.get("style", "")
         _style_desc = _project.get("style_description", "")
-        _full_prompt = build_character_prompt(resource_id, prompt, _style, _style_desc)
         _ref_images = None
-        _ref_path = _char_data.get("reference_image")
-        if _ref_path:
-            _full_ref = _project_path / _ref_path
-            if _full_ref.exists():
-                _ref_images = [_full_ref]
+        if _look is not None:
+            _look_entry = get_look_entry(_char_data, _look)
+            if _look_entry is None:
+                raise ValueError(f"character look not found: {resource_id}")
+            _look_desc = str(_look_entry.get("description") or prompt or "").strip() or prompt
+            _base_desc = str(_char_data.get("description") or "")
+            _full_prompt = build_character_look_prompt(
+                _char_key,
+                _look,
+                _look_desc,
+                base_description=_base_desc,
+                style=_style,
+                style_description=_style_desc,
+            )
+            _base_sheet = resolve_look_sheet_path(_char_data, None)
+            if _base_sheet:
+                _full_base = _project_path / _base_sheet
+                if _full_base.exists():
+                    _ref_images = [_full_base]
+        else:
+            _full_prompt = build_character_prompt(_display_id, prompt, _style, _style_desc)
+            _ref_path = _char_data.get("reference_image")
+            if _ref_path:
+                _full_ref = _project_path / _ref_path
+                if _full_ref.exists():
+                    _ref_images = [_full_ref]
         _visual_references = tuple(
             VisualReference(
                 path=path,
                 role="source",
                 logical_type="character",
                 logical_id=resource_id,
-                kind="original",
+                kind="sheet" if _look is not None else "original",
             )
             for path in (_ref_images or [])
         )
